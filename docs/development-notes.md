@@ -1,0 +1,164 @@
+﻿# Development notes
+
+Iteration log for implementation milestones.
+
+- Scaffold config loader and env validation assumptions.
+- Tighten TypeScript strictness for provider modules.
+- Add structured logging fields for market id and window.
+- Debounce websocket order book updates to reduce noise.
+- Handle reconnect backoff for WSS price feeds.
+- Normalize token ids before balance lookups.
+- Guardrail: skip trades when predictor confidence below threshold.
+- Refine price predictor momentum window for 15m cycles.
+- Track rolling accuracy per asset (btc, eth, sol, xrp).
+- Improve holdings fetch error handling and retries.
+- Clarify redeem flow for resolved positions.
+- Allowance check runs once per startup with clearer logs.
+- CLOB client: surface API errors without crashing the loop.
+- Copytrade: cap per-side buys when risk limits hit.
+- Order builder: validate tick size before posting limits.
+- Helpers: extract shared rounding for display prices.
+- RPC provider: configurable timeout for balance calls.
+- Document predictor inputs in code comments.
+- Auto-redeem: batch redeem attempts with small delays.
+- Redeem holdings script: friendlier console summary.
+- Redeem proxy: clarify when proxy factory path is used.
+- Index loop: pause individual markets on repeated failures.
+- USDC balance: refresh before large order placement.
+- Encode utilities: unit-style sanity checks for addresses.
+- Logger: rotate log file naming pattern.
+- Console file helper: flush on critical errors.
+- Types: narrow outcome union for order responses.
+- Config: read multi-market list from env.
+- Security: validate private key format early.
+- Minimum balance gate with clearer messaging.
+- Credential creation: better errors from CLOB API.
+- WebSocket orderbook: ignore stale sequences.
+- WSS provider: optional debug trace flag.
+- CLOB client: retry on transient 5xx.
+- Copytrade state path documented in README cross-link.
+- Order index exports: explicit public surface.
+- Redeem utils: align with on-chain revert messages.
+- Proxy wallet detection edge case fix.
+- Price predictor: damp extreme spikes in micro-volatility.
+- Balance util: handle empty token id list.
+- Holdings: parse API pagination defensively.
+- Main entry: graceful shutdown on SIGINT (where supported).
+- Auto-redeem: skip already redeemed positions.
+- README: clarify env vars for multi-market runs.
+- Docs: screenshot alt text and layout tweaks.
+- Yarn lock refresh after dependency patch.
+- Tsconfig path aliases hygiene (if any).
+- Add empty market guard in predictor warmup.
+- Limit order buffer: configurable slippage buffer.
+- Reduce log spam during quiet order book periods.
+- Copytrade: persist last prediction per window.
+- Telemetry: timing logs around order placement.
+- CLOB: handle partial fill reporting in logs.
+- Provider failover ordering documentation.
+- WebSocket: heartbeat to detect half-open connections.
+- Normalize USDC decimals in display strings.
+- Order builder: stricter side enum usage.
+- Security: redact private keys from thrown errors.
+- Validate minimum USDC before batch buys.
+- RPC: exponential backoff on rate limits.
+- Predictor: calibrate confidence from recent accuracy.
+- Main loop: stagger market subscriptions slightly.
+- Redeem: support alternate redemption entrypoints.
+- Docs development notes: keep iteration trail (this file).
+- Chore: formatting pass on src/providers.
+- Chore: formatting pass on src/order-builder.
+- Refactor: extract market window helper.
+- Refactor: shared wait-for-next-boundary utility.
+- Fix: race when switching 15m windows.
+- Fix: double-submit guard on duplicate signals.
+- Performance: cache static ABI fragments.
+- Performance: reduce JSON parse in hot paths.
+- Docs: link Polymarket UI screenshots in README.
+- Log copytrade state path on startup.
+- Warn when WALLET_PRIVATE_KEY missing in .env.example flow.
+- Clarify auto-redeem vs trading process separation.
+- Order book snapshot validation.
+- Ignore invalid price ticks from malformed messages.
+- Predictor: clamp probabilities to [0,1].
+- Improve error message for insufficient allowance.
+- CLOB auth headers refresh documentation.
+- Copytrade: max notional per cycle cap.
+- Reduce default WebSocket buffer if memory constrained.
+- Add safe defaults for debounce interval.
+- Logger levels reviewed for production vs debug.
+- Holdings summary sorted by market title.
+- Redeem flow logging: step markers.
+- Validate chain id for Base/Polygon assumptions.
+- Proxy factory ABI alignment with deployed contracts.
+- Minimum balance uses latest USDC price context.
+- Order cancellation path stub documentation.
+- Predictor history trim to prevent unbounded growth.
+- State file atomic write helper.
+- Recover from corrupt copytrade-state.json.
+- Document manual recovery steps in README.
+- WebSocket reconnect jitter.
+- Rate limit friendly polling for REST fallbacks.
+- Copytrade: optional dry-run mode message.
+- CLOB client: parse error body for known codes.
+- Types: stricter token metadata structure.
+- Utils: shared isValidAddress helper usage.
+- Entry: banner with version placeholder.
+- Redeem-holdings: non-zero exit codes on failure.
+- Auto-redeem: config for max markets per run.
+- Security review: no secrets in logs sweep.
+- README: risk disclaimer tone pass.
+- CONTRIBUTING note in development notes.
+- License section cross-check in README.
+- Package scripts description alignment.
+- Yarn: engines field compatibility note.
+- TS: noImplicitAny spot fixes in utils.
+- Provider interface documentation comments.
+- Order builder: size validation against min shares.
+- Predictor: optional verbose trace for tuning.
+- Main: per-market isolation try/catch.
+- Log rotation note for long-running VPS.
+- Docs: console screenshot updated reference.
+- Minor typo fixes in user-facing strings.
+- Refactor: constants for magic numbers (buffers).
+- Refactor: extract predictor feature flags.
+- Fix: off-by-one in window boundary test harness.
+- Chore: dependency audit follow-up.
+- WebSocket: TLS trust store note for corporate networks.
+- CLOB: header capitalization normalization.
+- Copytrade: persist last error for operator visibility.
+- Redeem: gas estimation note in logs.
+- RPC: fallback public RPC list documented.
+- Order helpers: pure functions for testability.
+- Predictor: feature weight tweak based on backtest.
+- Index: startup self-check checklist logs.
+- Auto-redeem: CSV-like summary optional output.
+- Security: mnemonic phrase explicitly unsupported message.
+- README: environment setup for Windows users.
+- Development-notes: milestone markers for releases.
+- Stability: catch unhandled promise in provider init.
+- Observability: duration ms on HTTP calls.
+- Copytrade: min interval between orders per side.
+- Docs: architecture one-liner in README intro.
+- Clean up unused imports in providers.
+- Clean up unused imports in order-builder.
+- Predictor: edge case for flat markets.
+- Market pause clears on next window boundary.
+- Log message internationalization comment.
+- Final polish pass on README headings.
+- Prepare for public repository publication.
+- Harden JSON parse around optional API fields.
+- Order book mid-price fallback when spread is wide.
+- Predictor: decay older candles more aggressively.
+- Copytrade: respect max concurrent markets setting.
+- Redeem: skip markets that lack resolution metadata.
+- Logger: include pid for multi-process deployments.
+- CLOB: surface rate-limit reset hints when present.
+- WebSocket: cap reconnect attempts with cooldown.
+- Docs: security.md stub for secret handling.
+- Chore: align error codes with internal wiki.
+- Release checklist note for tagged versions.
+- Smoke test steps for dry-run operators.
+- Post-release monitoring suggestions in development notes.
+- Archive old iteration bullets quarterly (process note).
+- Bot banner assets compressed for faster README loads.
