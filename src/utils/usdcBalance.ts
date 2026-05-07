@@ -1,7 +1,6 @@
 import { Chain, getContractConfig } from "@polymarket/clob-client";
 import { JsonRpcProvider } from "@ethersproject/providers";
 import { Contract } from "@ethersproject/contracts";
-import { Big } from "mjs-biginteger";
 import { config } from "../config";
 
 const ERC20_ABI = [
@@ -28,7 +27,7 @@ function getRpcUrl(chainId: number): string {
     throw new Error(`Unsupported chain ID: ${chainId}. Supported: 137 (Polygon), 80002 (Amoy)`);
 }
 
-function formatUnits(value: Big, decimals: number): number {
+function formatUnits(value: bigint, decimals: number): number {
     // Avoid pulling in extra deps; USDC is 6 decimals on Polygon.
     const s = value.toString();
     if (decimals <= 0) return Number(s);
@@ -57,7 +56,7 @@ export async function getUsdcBalance(
         usdc.decimals() as Promise<number>,
     ]);
 
-    return formatUnits(Big(String(rawBalance)), decimals);
+    return formatUnits(BigInt(String(rawBalance)), decimals);
 }
 
 

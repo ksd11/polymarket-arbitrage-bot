@@ -1,5 +1,4 @@
 import { MaxUint256 } from "@ethersproject/constants";
-import { Big } from "mjs-biginteger";
 import { Wallet } from "@ethersproject/wallet";
 import { JsonRpcProvider } from "@ethersproject/providers";
 import { Contract } from "@ethersproject/contracts";
@@ -19,6 +18,10 @@ const CTF_ABI = [
     "function setApprovalForAll(address operator, bool approved) external",
     "function isApprovedForAll(address account, address operator) external view returns (bool)",
 ];
+
+function addGasPriceBuffer(gasPrice: unknown): string {
+    return ((BigInt(String(gasPrice)) * 12n) / 10n).toString();
+}
 
 /**
  * Get RPC provider URL based on chain ID
@@ -110,9 +113,8 @@ export async function approveUSDCAllowance(): Promise<void> {
     let gasOptions: { gasPrice?: string; gasLimit?: number } = {};
     try {
         const gasPrice = await provider.getGasPrice();
-        const gasPriceBig = Big(String(gasPrice)).times(1.2).round(0, Big.roundDown).toString();
         gasOptions = {
-            gasPrice: gasPriceBig, // 20% buffer (wei as string)
+            gasPrice: addGasPriceBuffer(gasPrice), // 20% buffer (wei as string)
             gasLimit: 200_000,
         };
     } catch (error) {
@@ -246,9 +248,8 @@ export async function approveTokensAfterBuy(): Promise<void> {
     let gasOptions: { gasPrice?: string; gasLimit?: number } = {};
     try {
         const gasPrice = await provider.getGasPrice();
-        const gasPriceBig = Big(String(gasPrice)).times(1.2).round(0, Big.roundDown).toString();
         gasOptions = {
-            gasPrice: gasPriceBig, // 20% buffer (wei as string)
+            gasPrice: addGasPriceBuffer(gasPrice), // 20% buffer (wei as string)
             gasLimit: 200_000,
         };
     } catch (error) {

@@ -6,6 +6,7 @@ import { getClobClient } from "./providers/clobclient";
 import { waitForMinimumUsdcBalance } from "./utils/balance";
 import { config } from "./config";
 import { logger } from "./utils/logger";
+import "st-bigintr";
 
 import { CopytradeArbBot } from "./order-builder/copytrade";
 import { setupConsoleFileLogging } from "./utils/console-file";
@@ -48,7 +49,11 @@ async function waitMs(ms: number, label: string): Promise<void> {
 async function main() {
     logger.info("Starting the bot...");
 
-    validatePrivateKey();
+    const hasValidPrivateKey = validatePrivateKey();
+    if (!hasValidPrivateKey) {
+        logger.error("Startup validation failed. Bot initialization is skipped.");
+        return;
+    }
 
     // Create credentials if they don't exist
     const credential = await createCredential();
@@ -118,5 +123,4 @@ async function main() {
 
 main().catch((error) => {
     console.log("Fatal error", error);
-    process.exit(1);
 });

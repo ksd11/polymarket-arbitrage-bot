@@ -3,13 +3,13 @@ import { config } from "../config";
 
 /**
  * Validates that WALLET_PRIVATE_KEY is set and is a valid Ethereum private key.
- * If invalid: logs the error and exits the process with code 1.
+ * If invalid: logs the error and returns false.
  */
-export function validatePrivateKey(): void {
+export function validatePrivateKey(): boolean {
     const privateKey = config.privateKey;
     if (!privateKey || !privateKey.trim()) {
         console.log("WALLET_PRIVATE_KEY is missing or empty. Set WALLET_PRIVATE_KEY in your .env file.");
-        process.exit(1);
+        return false;
     }
 
     const trimmed = privateKey.trim();
@@ -21,6 +21,7 @@ export function validatePrivateKey(): void {
         console.log(
             "Private key must be a valid 32-byte hex string (64 hex characters, optionally prefixed with 0x)."
         );
-        process.exit(1);
+        return false;
     }
+    return true;
 }

@@ -1,5 +1,4 @@
 import { hexZeroPad } from "@ethersproject/bytes";
-import { Big } from "mjs-biginteger";
 import { Interface } from "@ethersproject/abi";
 
 // Conditional Tokens Framework ABI for encoding
@@ -14,6 +13,12 @@ const NEG_RISK_ABI = [
 
 const CTF_INTERFACE = new Interface(CTF_ABI);
 const NEG_RISK_INTERFACE = new Interface(NEG_RISK_ABI);
+
+function toUint256String(amount: string): string {
+    const trimmed = amount.trim();
+    const [integerPart] = trimmed.split(".");
+    return BigInt(integerPart || "0").toString();
+}
 
 /**
  * Encode redeem transaction data for standard (non-neg-risk) markets
@@ -74,8 +79,8 @@ export function encodeRedeemNegRisk(conditionId: string, amounts: string[]): str
     // Default index sets for Polymarket binary markets: [1, 2] (YES and NO)
     const indexSets = [1, 2];
     
-    // Convert amounts to Big array (integer strings for uint256)
-    const amountsBN = amounts.map(amt => Big(amt).round(0, Big.roundDown).toString());
+    // Convert amounts to integer strings for uint256.
+    const amountsBN = amounts.map(toUint256String);
     
     return NEG_RISK_INTERFACE.encodeFunctionData("redeem", [
         collateralToken,

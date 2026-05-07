@@ -1,4 +1,3 @@
-import { Big } from "mjs-biginteger";
 import { hexZeroPad } from "@ethersproject/bytes";
 import { Wallet } from "@ethersproject/wallet";
 import { JsonRpcProvider } from "@ethersproject/providers";
@@ -7,6 +6,10 @@ import { Chain, getContractConfig } from "@polymarket/clob-client";
 import { logger } from "./logger";
 import { getClobClient } from "../providers/clobclient";
 import { config } from "../config";
+
+function addGasPriceBuffer(gasPrice: unknown): string {
+    return ((BigInt(String(gasPrice)) * 12n) / 10n).toString();
+}
 
 // CTF Contract ABI - functions needed for redemption and checking resolution
 const CTF_ABI = [
@@ -308,9 +311,8 @@ export async function redeemPositions(options: RedeemOptions): Promise<any> {
     let gasOptions: { gasPrice?: string; gasLimit?: number } = {};
     try {
         const gasPrice = await provider.getGasPrice();
-        const gasPriceBig = Big(String(gasPrice)).times(1.2).round(0, Big.roundDown).toString();
         gasOptions = {
-            gasPrice: gasPriceBig, // 20% buffer (wei as string)
+            gasPrice: addGasPriceBuffer(gasPrice), // 20% buffer (wei as string)
             gasLimit: 500_000,
         };
     } catch (error) {
@@ -490,7 +492,7 @@ export async function redeemMarket(
     // Filter to only winning indexSets that user actually holds
     const redeemableIndexSets = resolution.winningIndexSets.filter(indexSet => {
         const balance = userBalances.get(indexSet);
-        return balance && !balance.eq(0);
+        return balance !== undefined && balance !== 0n;
     });
     
     if (redeemableIndexSets.length === 0) {
@@ -539,8 +541,8 @@ export async function checkConditionResolution(
 ): Promise<{
     isResolved: boolean;
     winningIndexSets: number[];
-    payoutDenominator: Big;
-    payoutNumerators: Big[];
+    payoutDenominator: bigint;
+    payoutNumerators: bigint[];
     outcomeSlotCount: number;
     reason?: string;
 }> {
@@ -575,22 +577,22 @@ export async function checkConditionResolution(
         
         // Check payout denominator - if > 0, condition is resolved
         const payoutDenominatorRaw = await ctfContract.payoutDenominator(conditionIdBytes32);
-        const payoutDenominator = Big(String(payoutDenominatorRaw));
-        const isResolved = !payoutDenominator.eq(0);
+        const payoutDenominator = BigInt(String(payoutDenominatorRaw));
+        const isResolved = payoutDenominator !== 0n;
         
         let winningIndexSets: number[] = [];
-        let payoutNumerators: Big[] = [];
+        let payoutNumerators: bigint[] = [];
         
         if (isResolved) {
             // Get payout numerators for each outcome
             payoutNumerators = [];
             for (let i = 0; i < outcomeSlotCount; i++) {
                 const numeratorRaw = await ctfContract.payoutNumerators(conditionIdBytes32, i);
-                const numerator = Big(String(numeratorRaw));
+                const numerator = BigInt(String(numeratorRaw));
                 payoutNumerators.push(numerator);
                 
                 // If numerator > 0, this outcome won (indexSet is i+1, as indexSets are 1-indexed)
-                if (!numerator.eq(0)) {
+                if (numerator !== 0n) {
                     winningIndexSets.push(i + 1);
                 }
             }
@@ -616,7 +618,7 @@ export async function checkConditionResolution(
         return {
             isResolved: false,
             winningIndexSets: [],
-            payoutDenominator: Big(0),
+            payoutDenominator: 0n,
             payoutNumerators: [],
             outcomeSlotCount: 0,
             reason: `Error checking resolution: ${errorMsg}`,
@@ -636,7 +638,7 @@ export async function getUserTokenBalances(
     conditionId: string,
     walletAddress: string,
     chainId?: Chain
-): Promise<Map<number, Big>> {
+): Promise<Map<number, bigint>> {
     const privateKey = config.requirePrivateKey();
 
     const chainIdValue = chainId || ((config.chainId || Chain.POLYGON) as Chain);
@@ -662,7 +664,7 @@ export async function getUserTokenBalances(
         wallet
     );
 
-    const balances = new Map<number, Big>();
+    const balances = new Map<number, bigint>();
     const parentCollectionId = "0x0000000000000000000000000000000000000000000000000000000000000000";
     
     try {
@@ -687,8 +689,8 @@ export async function getUserTokenBalances(
                 
                 // Get balance
                 const balance = await ctfContract.balanceOf(walletAddress, positionId);
-                const balanceBig = Big(String(balance));
-                if (!balanceBig.eq(0)) {
+                const balanceBig = BigInt(String(balance));
+                if (balanceBig !== 0n) {
                     balances.set(i, balanceBig);
                 }
             } catch (error) {
@@ -969,7 +971,7 @@ export async function getMarketsWithUserPositions(
         chainId?: Chain;
         onlyRedeemable?: boolean; // Only return positions that are redeemable (default: false)
     }
-): Promise<Array<{ conditionId: string; position: CurrentPosition; balances: Map<number, Big> }>> {
+): Promise<Array<{ conditionId: string; position: CurrentPosition; balances: Map<number, bigint> }>> {
     const privateKey = config.requirePrivateKey();
 
     const chainIdValue = options?.chainId || ((config.chainId || Chain.POLYGON) as Chain);
@@ -983,7 +985,7 @@ export async function getMarketsWithUserPositions(
     logger.info(`Wallet: ${walletAddress}`);
     logger.info(`Using /positions endpoint (returns tokens you currently hold)`);
     
-    const marketsWithPositions: Array<{ conditionId: string; position: CurrentPosition; balances: Map<number, Big> }> = [];
+    const marketsWithPositions: Array<{ conditionId: string; position: CurrentPosition; balances: Map<number, bigint> }> = [];
     
     try {
         // Use Polymarket data-api /positions endpoint (CORRECT METHOD for active positions!)
@@ -1113,7 +1115,7 @@ export async function getRedeemablePositions(
         walletAddress?: string;
         chainId?: Chain;
     }
-): Promise<Array<{ conditionId: string; position: CurrentPosition; balances: Map<number, Big> }>> {
+): Promise<Array<{ conditionId: string; position: CurrentPosition; balances: Map<number, bigint> }>> {
     return getMarketsWithUserPositions({
         ...options,
         onlyRedeemable: true,
@@ -1225,7 +1227,7 @@ export async function redeemAllWinningMarketsFromAPI(options?: {
                 // Filter to only winning indexSets that user holds
                 const winningHeld = resolution.winningIndexSets.filter(indexSet => {
                     const balance = userBalances.get(indexSet);
-                    return balance && !balance.eq(0);
+                    return balance !== undefined && balance !== 0n;
                 });
                 
                 if (winningHeld.length > 0) {
