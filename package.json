@@ -3,6 +3,7 @@
   "version": "1.0.1",
   "main": "index.js",
   "scripts": {
+    "setup:dev": "npm install && npm run start",
     "start": "tsx src/index.ts",
     "redeem": "tsx src/redeem.ts",
     "redeem:holdings": "tsx src/redeem-holdings.ts",
