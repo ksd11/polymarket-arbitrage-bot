@@ -2,8 +2,8 @@ import { MaxUint256 } from "@ethersproject/constants";
 import { Wallet } from "@ethersproject/wallet";
 import { JsonRpcProvider } from "@ethersproject/providers";
 import { Contract } from "@ethersproject/contracts";
-import { Chain, AssetType, ClobClient } from "@polymarket/clob-client";
-import { getContractConfig } from "@polymarket/clob-client";
+import { Chain, AssetType, ClobClient } from "@polymarket/clob-client-v2";
+import { getContractConfig } from "@polymarket/clob-client-v2";
 import { logger } from "../utils/logger";
 import { config } from "../config";
 

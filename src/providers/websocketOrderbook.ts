@@ -1,8 +1,9 @@
 import WebSocket from "ws";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import { logger } from "../utils/logger";
 import { readFileSync, existsSync } from "fs";
 import { resolve } from "path";
-import type { ApiKeyCreds } from "@polymarket/clob-client";
+import type { ApiKeyCreds } from "@polymarket/clob-client-v2";
 
 const MARKET_CHANNEL = "market";
 const USER_CHANNEL = "user";
@@ -159,7 +160,15 @@ export class WebSocketOrderBook {
             const fullUrl = `${this.url}/ws/${this.channelType}`;
             logger.info(`Connecting to WebSocket: ${fullUrl}`);
 
-            this.ws = new WebSocket(fullUrl);
+            // Use HTTPS_PROXY or ALL_PROXY if available
+            const proxyUrl = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.ALL_PROXY || process.env.all_proxy;
+            const wsOptions: WebSocket.ClientOptions = {};
+            if (proxyUrl) {
+                logger.info(`Using proxy: ${proxyUrl}`);
+                wsOptions.agent = new HttpsProxyAgent(proxyUrl) as any;
+            }
+
+            this.ws = new WebSocket(fullUrl, wsOptions);
 
             this.ws.on("open", () => {
                 logger.info(`WebSocket connected (${this.channelType} channel)`);

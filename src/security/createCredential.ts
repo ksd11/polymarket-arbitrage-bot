@@ -1,4 +1,4 @@
-import { ApiKeyCreds, ClobClient, Chain } from "@polymarket/clob-client";
+import { ApiKeyCreds, ClobClient, Chain, SignatureTypeV2 } from "@polymarket/clob-client-v2";
 import { writeFileSync, existsSync, mkdirSync } from "fs";
 import { resolve, dirname } from "path";
 import { Wallet } from "@ethersproject/wallet";
@@ -30,7 +30,12 @@ export async function createCredential(): Promise<ApiKeyCreds | null> {
         const host = config.clobApiUrl;
 
         // Create temporary ClobClient (no API key) and derive/create API key
-        const clobClient = new ClobClient(host, chainId, wallet);
+        const clobClient = new ClobClient({
+            host,
+            chain: chainId,
+            signer: wallet,
+            signatureType: SignatureTypeV2.EOA,
+        });
         const credential = await clobClient.createOrDeriveApiKey();
         await saveCredential(credential);
 

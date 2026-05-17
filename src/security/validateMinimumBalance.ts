@@ -1,4 +1,4 @@
-import { ClobClient, AssetType } from "@polymarket/clob-client";
+import { ClobClient, AssetType } from "@polymarket/clob-client-v2";
 import { getAvailableBalance } from "../utils/balance";
 import { config } from "../config";
 import { logger } from "../utils/logger";
@@ -23,7 +23,9 @@ export async function validateMinimumBalance(client: ClobClient): Promise<void> 
         });
 
         const balance = parseFloat(balanceResponse.balance || "0") / 10 ** 6;
-        const allowance = parseFloat(balanceResponse.allowance || "0") / 10 ** 6;
+        const allowance = Object.values(balanceResponse.allowances || {}).reduce(
+            (sum, v) => sum + parseFloat(v || "0"), 0
+        ) / 10 ** 6;
         const available = (await getAvailableBalance(client, AssetType.COLLATERAL)) / 10 ** 6;
 
         if (available < minimumUsd) {

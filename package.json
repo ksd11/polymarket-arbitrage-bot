@@ -23,8 +23,14 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@ethersproject/abi": "^5.8.0",
+    "@ethersproject/bytes": "^5.8.0",
+    "@ethersproject/constants": "^5.8.0",
+    "@ethersproject/contracts": "^5.8.0",
+    "@ethersproject/providers": "^5.8.0",
+    "@ethersproject/units": "^5.8.0",
     "@ethersproject/wallet": "^5.8.0",
-    "@polymarket/clob-client": "^4.22.8",
+    "@polymarket/clob-client-v2": "^1.0.6",
     "@polymarket/real-time-data-client": "^1.4.0",
     "@types/ws": "^8.18.1",
     "chalk": "^4.1.2",
@@ -32,6 +38,7 @@
     "ethers": "^6.16.0",
     "st-bigintr": "^5.0.6",
     "tsx": "^4.21.0",
+    "undici": "^8.3.0",
     "ws": "^8.19.0"
   }
 }

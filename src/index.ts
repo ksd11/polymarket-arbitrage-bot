@@ -1,3 +1,9 @@
+// Setup global fetch proxy FIRST (before any other imports that might call fetch)
+import "./setup-proxy";
+
+// Patch Exchange protocol version to V2 (npm package still ships V1)
+import "./patch-exchange-v2";
+
 import { validatePrivateKey } from "./security/validatePrivateKey";
 import { validateMinimumBalance } from "./security/validateMinimumBalance";
 import { createCredential } from "./security/createCredential";
@@ -70,18 +76,23 @@ async function main() {
     // Validate minimum wallet balance before proceeding (exits if insufficient)
     await validateMinimumBalance(clobClient);
 
-    // Approve USDC allowances to Polymarket contracts
+    // Approve USDC allowances to Polymarket contracts (skip if SKIP_ALLOWANCE_APPROVE=true)
     {
-        try {
-            console.log("Approving USDC allowances to Polymarket contracts...");
-            await approveUSDCAllowance();
+        const skipApprove = process.env.SKIP_ALLOWANCE_APPROVE === "true";
+        if (skipApprove) {
+            console.log("Skipping on-chain allowance approval (SKIP_ALLOWANCE_APPROVE=true)");
+        } else {
+            try {
+                console.log("Approving USDC allowances to Polymarket contracts...");
+                await approveUSDCAllowance();
 
-            // Update CLOB API to sync with on-chain allowances
-            console.log("Syncing allowances with CLOB API...");
-            await updateClobBalanceAllowance(clobClient);
-        } catch (error) {
-            console.log("Failed to approve USDC allowances", error);
-            console.log("Continuing without allowances - orders may fail");
+                // Update CLOB API to sync with on-chain allowances
+                console.log("Syncing allowances with CLOB API...");
+                await updateClobBalanceAllowance(clobClient);
+            } catch (error) {
+                console.log("Failed to approve USDC allowances:", error instanceof Error ? error.message : String(error));
+                console.log("Continuing without allowances - orders may fail if not previously approved");
+            }
         }
 
         // Validation gate: proceed only once available USDC balance is >= $1

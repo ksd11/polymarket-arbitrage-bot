@@ -1,4 +1,4 @@
-import { ClobClient, CreateOrderOptions, OrderType, Side, UserOrder } from "@polymarket/clob-client";
+import { ClobClient, CreateOrderOptions, OrderType, Side, UserOrderV2 as UserOrder } from "@polymarket/clob-client-v2";
 import * as fs from "fs";
 import * as path from "path";
 import { logger } from "../utils/logger";

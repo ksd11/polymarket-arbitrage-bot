@@ -1,6 +1,6 @@
 import { readFileSync, existsSync } from "fs";
-import { Chain, ClobClient } from "@polymarket/clob-client";
-import type { ApiKeyCreds } from "@polymarket/clob-client";
+import { Chain, ClobClient, SignatureTypeV2 } from "@polymarket/clob-client-v2";
+import type { ApiKeyCreds } from "@polymarket/clob-client-v2";
 import { Wallet } from "@ethersproject/wallet";
 import { config } from "../config";
 import { ensureCredential, credentialPath } from "../security/createCredential";
@@ -10,7 +10,7 @@ let cachedClient: ClobClient | null = null;
 let cachedConfig: { chainId: number; host: string } | null = null;
 
 /**
- * Initialize ClobClient from credentials (cached singleton).
+ * Initialize ClobClient V2 from credentials (cached singleton).
  * If credential file is missing, creates it automatically via createOrDeriveApiKey.
  */
 export async function getClobClient(): Promise<ClobClient> {
@@ -49,13 +49,24 @@ export async function getClobClient(): Promise<ClobClient> {
         passphrase: creds.passphrase,
     };
 
-    // Signature type: 0 = EOA (browser/MetaMask), 2 = proxy/smart wallet. Use EOA by default so
-    // orders are signed as your wallet; only use 2 + funder when SIG_TYPE=proxy|gnosis.
-    const signatureType = config.useProxyWallet ? 2 : 0;
+    // Signature type for V2 Exchange:
+    // In V2, POLY_PROXY (1) is BLOCKED for order submission.
+    // Use POLY_1271 (3) = "Deposit Wallet" mode for proxy wallet users.
+    // 0 = EOA, 1 = POLY_PROXY (blocked), 2 = POLY_GNOSIS_SAFE, 3 = POLY_1271 (deposit wallet)
+    const signatureType: SignatureTypeV2 = config.useProxyWallet
+        ? SignatureTypeV2.POLY_1271
+        : SignatureTypeV2.EOA;
     const funderAddress = config.useProxyWallet ? config.proxyWalletAddress : undefined;
 
-    // Create and cache client
-    cachedClient = new ClobClient(host, chainId, wallet, apiKeyCreds, signatureType, funderAddress);
+    // V2 SDK: constructor takes an options object (not positional args)
+    cachedClient = new ClobClient({
+        host,
+        chain: chainId,
+        signer: wallet,
+        creds: apiKeyCreds,
+        signatureType,
+        funderAddress,
+    });
     cachedConfig = { chainId, host };
 
     return cachedClient;

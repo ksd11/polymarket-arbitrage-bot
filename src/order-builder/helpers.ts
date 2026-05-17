@@ -1,4 +1,4 @@
-import { Side, OrderType, UserMarketOrder, CreateOrderOptions } from "@polymarket/clob-client";
+import { Side, OrderType, UserMarketOrderV2 as UserMarketOrder, CreateOrderOptions } from "@polymarket/clob-client-v2";
 import type { TradePayload } from "../utils/types";
 import type { CopyTradeOptions } from "./types";
 

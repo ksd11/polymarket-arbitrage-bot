@@ -2,7 +2,7 @@ import { hexZeroPad } from "@ethersproject/bytes";
 import { Wallet } from "@ethersproject/wallet";
 import { JsonRpcProvider } from "@ethersproject/providers";
 import { Contract } from "@ethersproject/contracts";
-import { Chain, getContractConfig } from "@polymarket/clob-client";
+import { Chain, getContractConfig } from "@polymarket/clob-client-v2";
 import { logger } from "./logger";
 import { getClobClient } from "../providers/clobclient";
 import { config } from "../config";

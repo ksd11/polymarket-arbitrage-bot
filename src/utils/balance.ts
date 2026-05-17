@@ -1,4 +1,4 @@
-import { ClobClient, AssetType, type OpenOrder } from "@polymarket/clob-client";
+import { ClobClient, AssetType, type OpenOrder } from "@polymarket/clob-client-v2";
 import { logger } from "./logger";
 
 /**
@@ -71,14 +71,16 @@ export async function displayWalletBalance(client: ClobClient): Promise<{ balanc
         });
 
         const balance = parseFloat(balanceResponse.balance || "0");
-        const allowance = parseFloat(balanceResponse.allowance || "0");
+        const allowance = Object.values(balanceResponse.allowances || {}).reduce(
+            (sum, v) => sum + parseFloat(v || "0"), 0
+        );
 
         logger.info("═══════════════════════════════════════");
         logger.info("💰 WALLET BALANCE & ALLOWANCE");
         logger.info("═══════════════════════════════════════");
         logger.info(`USDC Balance: ${balance.toFixed(6)}`);
-        logger.info(`USDC Allowance: ${allowance.toFixed(6)}`);
-        logger.info(`Available: ${balance.toFixed(6)} (Balance: ${balance.toFixed(6)}, Allowance: ${allowance.toFixed(6)})`);
+        logger.info(`USDC Allowances: ${JSON.stringify(balanceResponse.allowances)}`);
+        logger.info(`Available: ${balance.toFixed(6)}`);
         logger.info("═══════════════════════════════════════");
 
         return { balance, allowance };
@@ -102,7 +104,9 @@ export async function validateBuyOrderBalance(
         });
 
         const balance = parseFloat(balanceResponse.balance || "0") / 10 ** 6;
-        const allowance = parseFloat(balanceResponse.allowance || "0") / 10 ** 6;
+        const allowance = Object.values(balanceResponse.allowances || {}).reduce(
+            (sum, v) => sum + parseFloat(v || "0"), 0
+        ) / 10 ** 6;
         const available = (await getAvailableBalance(client, AssetType.COLLATERAL)) / 10 ** 6;
         const valid = available >= requiredAmount;
 
@@ -179,15 +183,17 @@ export async function waitForMinimumUsdcBalance(
             });
 
             const balance = parseFloat(balanceResponse.balance || "0") / 10 ** 6;
-            const allowance = parseFloat(balanceResponse.allowance || "0") / 10 ** 6;
+            const allowance = Object.values(balanceResponse.allowances || {}).reduce(
+                (sum, v) => sum + parseFloat(v || "0"), 0
+            ) / 10 ** 6;
             const available = (await getAvailableBalance(client, AssetType.COLLATERAL)) / 10 ** 6;
 
             logger.info("═══════════════════════════════════════");
             logger.info("💰 WALLET BALANCE & ALLOWANCE");
             logger.info("═══════════════════════════════════════");
             logger.info(`USDC Balance: ${balance.toFixed(6)}`);
-            logger.info(`USDC Allowance: ${allowance.toFixed(6)}`);
-            logger.info(`Available: ${balance.toFixed(6)} (Balance: ${balance.toFixed(6)}, Allowance: ${allowance.toFixed(6)})`);
+            logger.info(`USDC Allowances: ${JSON.stringify(balanceResponse.allowances)}`);
+            logger.info(`Available: ${available.toFixed(6)}`);
             logger.info("═══════════════════════════════════════");
 
             const ok = available >= minimumUsd;
