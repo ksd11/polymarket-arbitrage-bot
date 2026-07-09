@@ -14,7 +14,6 @@ import { approveUSDCAllowance, updateClobBalanceAllowance } from "./security/all
 import { waitForMinimumUsdcBalance } from "./utils/balance";
 import { logger } from "./utils/logger";
 import { setupConsoleFileLogging } from "./utils/console-file";
-import "st-bigintr";
 
 type ArbConfig = {
     dryRun: boolean;

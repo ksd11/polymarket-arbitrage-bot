@@ -12,7 +12,6 @@ import { getClobClient } from "./providers/clobclient";
 import { waitForMinimumUsdcBalance } from "./utils/balance";
 import { config } from "./config";
 import { logger } from "./utils/logger";
-import "st-bigintr";
 
 import { CopytradeArbBot } from "./order-builder/copytrade";
 import { setupConsoleFileLogging } from "./utils/console-file";
