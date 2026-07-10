@@ -139,7 +139,12 @@ BTC 5m edge backtest:
 npm run backtest:btc5m -- --strategy edge --csv data/btc5m-history.csv
 ```
 
-`--strategy` and `--csv` are required. The current `edge` strategy needs `btc_price` and `open_price`; Polymarket-only CSVs with only `winning_outcome` are useful for the next settlement/盘口-based strategy.
+`--strategy` and `--csv` are required. Supported strategy names:
+- `edge` or `btc5m:edge` — Standalone BTC fair-probability mispricing strategy; requires `btc_price` and `open_price`. It is currently backtest-only, not wired to live orders.
+- `range-arb` or `btc5m:range-arb` — Backtests the fixed-price `RANGE_ARB_PRICE_X` / `RANGE_ARB_USDC_PER_LEG` strategy.
+- `market-maker` or `btc5m:market-maker` — Backtests the current bid-quoting market-maker logic using `MM_` parameters.
+
+Polymarket-only CSVs with `winning_outcome` can be used by `range-arb` and `market-maker`.
 
 Collect BTC 5m history:
 ```bash
@@ -162,7 +167,7 @@ Optional columns:
 - `open_price` — BTC price at cycle open. If omitted, the first row in each cycle is used.
 
 Backtest knobs:
-- `BACKTEST_STRATEGY` — Strategy name. Currently supported: `edge`.
+- `BACKTEST_STRATEGY` — Strategy name. Supported: `edge`, `btc5m:edge`, `range-arb`, `market-maker`, `btc5m:range-arb`, `btc5m:market-maker`.
 - `BACKTEST_MIN_EDGE` — Minimum `fairProbability - askPrice` needed to buy. Default `0.03`.
 - `BACKTEST_ORDER_USDC` — USDC per simulated buy. Default `5`.
 - `BACKTEST_MAX_USDC_PER_LEG` — Max UP or DOWN spend per cycle. Default `10`.

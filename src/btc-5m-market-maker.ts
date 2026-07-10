@@ -14,6 +14,7 @@ import { approveUSDCAllowance, updateClobBalanceAllowance } from "./security/all
 import { waitForMinimumUsdcBalance } from "./utils/balance";
 import { logger } from "./utils/logger";
 import { setupConsoleFileLogging } from "./utils/console-file";
+import { buildBtc5mMarketMakerQuotes } from "./strategies/btc5m/market-maker";
 
 type Leg = "UP" | "DOWN";
 type QuoteSide = "BUY" | "SELL";
@@ -185,23 +186,9 @@ function isFinalOrderStatus(status: string): boolean {
     return ["FILLED", "MATCHED", "CANCELLED", "CANCELED", "REJECTED", "FAILED"].includes(status.toUpperCase());
 }
 
-function clamp(value: number, min: number, max: number): number {
-    return Math.min(max, Math.max(min, value));
-}
-
 function tickToNumber(tickSize: CreateOrderOptions["tickSize"]): number {
     const parsed = Number(tickSize);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 0.01;
-}
-
-function tickDecimals(tick: number): number {
-    const [, fraction = ""] = tick.toString().split(".");
-    return fraction.length;
-}
-
-function roundToTick(price: number, tick: number, mode: "floor" | "ceil"): number {
-    const rounded = mode === "floor" ? Math.floor(price / tick) * tick : Math.ceil(price / tick) * tick;
-    return Number(clamp(rounded, tick, 1 - tick).toFixed(tickDecimals(tick)));
 }
 
 class BtcFiveMinuteMarketMakerBot {
@@ -299,57 +286,38 @@ class BtcFiveMinuteMarketMakerBot {
         const downPrice = this.ws.getPrice(this.tokens.downTokenId);
         if (!upPrice || !downPrice) return [];
 
-        const upMid = upPrice.mid;
-        const downMid = downPrice.mid;
-        if (upMid === null && downMid === null) return [];
-
-        const fairUp = clamp(
-            upMid !== null && downMid !== null ? (upMid + (1 - downMid)) / 2 : upMid ?? 1 - (downMid as number),
-            this.tick,
-            1 - this.tick
-        );
-        const fairDown = 1 - fairUp;
-        const netInventory = this.qUp - this.qDown;
-        const inventorySkew = this.cfg.inventorySkewPerShare * netInventory;
-
-        const bidUp = roundToTick(fairUp - this.cfg.quoteSpread / 2 - inventorySkew, this.tick, "floor");
-        const bidDown = roundToTick(fairDown - this.cfg.quoteSpread / 2 + inventorySkew, this.tick, "floor");
-        const buyCost = bidUp + bidDown;
-        const secondsLeft = this.tokens ? (this.tokens.endMs - Date.now()) / 1000 : 0;
-        const quotes: Quote[] = [];
-
-        if (secondsLeft >= this.cfg.minSecondsLeftToQuote && buyCost <= 1 - this.cfg.minLockedEdge) {
-            const buyCapacity = this.cfg.maxInventoryShares - Math.max(this.qUp, this.qDown);
-            const upBuySize = Math.min(this.cfg.quoteShares, buyCapacity, this.buyBudgetSize("UP", bidUp, "UP:BUY"));
-            const downBuySize = Math.min(this.cfg.quoteShares, buyCapacity, this.buyBudgetSize("DOWN", bidDown, "DOWN:BUY"));
-            if (upBuySize > 0) quotes.push({ key: "UP:BUY", leg: "UP", side: "BUY", tokenId: this.tokens.upTokenId, price: bidUp, size: upBuySize });
-            if (downBuySize > 0) quotes.push({ key: "DOWN:BUY", leg: "DOWN", side: "BUY", tokenId: this.tokens.downTokenId, price: bidDown, size: downBuySize });
-        }
-
-        if (this.cfg.enableSellExcess) {
-            const askUp = roundToTick(fairUp + this.cfg.quoteSpread / 2 - inventorySkew, this.tick, "ceil");
-            const askDown = roundToTick(fairDown + this.cfg.quoteSpread / 2 + inventorySkew, this.tick, "ceil");
-            const excessUp = Math.max(0, this.qUp - this.qDown);
-            const excessDown = Math.max(0, this.qDown - this.qUp);
-            const sellUpSize = Math.min(this.cfg.quoteShares, excessUp);
-            const sellDownSize = Math.min(this.cfg.quoteShares, excessDown);
-            if (sellUpSize > 0) quotes.push({ key: "UP:SELL", leg: "UP", side: "SELL", tokenId: this.tokens.upTokenId, price: askUp, size: sellUpSize });
-            if (sellDownSize > 0) quotes.push({ key: "DOWN:SELL", leg: "DOWN", side: "SELL", tokenId: this.tokens.downTokenId, price: askDown, size: sellDownSize });
-        }
+        const secondsLeft = (this.tokens.endMs - Date.now()) / 1000;
+        const decision = buildBtc5mMarketMakerQuotes({
+            up: upPrice,
+            down: downPrice,
+            upTokenId: this.tokens.upTokenId,
+            downTokenId: this.tokens.downTokenId,
+            secondsLeft,
+            params: {
+                quoteShares: this.cfg.quoteShares,
+                maxUsdcPerLeg: this.cfg.maxUsdcPerLeg,
+                maxInventoryShares: this.cfg.maxInventoryShares,
+                quoteSpread: this.cfg.quoteSpread,
+                minLockedEdge: this.cfg.minLockedEdge,
+                inventorySkewPerShare: this.cfg.inventorySkewPerShare,
+                enableSellExcess: this.cfg.enableSellExcess,
+                minSecondsLeftToQuote: this.cfg.minSecondsLeftToQuote,
+                tick: this.tick,
+            },
+            state: {
+                qUp: this.qUp,
+                qDown: this.qDown,
+                buyCostUp: this.buyCostUp,
+                buyCostDown: this.buyCostDown,
+                pendingBuyNotionalUp: this.pendingBuyNotional("UP", "UP:BUY"),
+                pendingBuyNotionalDown: this.pendingBuyNotional("DOWN", "DOWN:BUY"),
+            },
+        });
 
         logger.info(
-            `MM fair: UP=${fairUp.toFixed(4)} DOWN=${fairDown.toFixed(4)} | bidCost=${buyCost.toFixed(4)} | inv UP=${this.qUp.toFixed(4)} DOWN=${this.qDown.toFixed(4)} net=${netInventory.toFixed(4)} | buyCost UP=${this.buyCostUp.toFixed(4)} DOWN=${this.buyCostDown.toFixed(4)}`
+            `MM fair: UP=${decision.fairUp?.toFixed(4) ?? "--"} DOWN=${decision.fairDown?.toFixed(4) ?? "--"} | bidCost=${decision.bidCost?.toFixed(4) ?? "--"} | inv UP=${this.qUp.toFixed(4)} DOWN=${this.qDown.toFixed(4)} net=${(this.qUp - this.qDown).toFixed(4)} | buyCost UP=${this.buyCostUp.toFixed(4)} DOWN=${this.buyCostDown.toFixed(4)}`
         );
-        return quotes;
-    }
-
-    private buyBudgetSize(leg: Leg, price: number, excludeKey: OrderKey): number {
-        if (this.cfg.maxUsdcPerLeg <= 0) return Number.POSITIVE_INFINITY;
-        const spent = leg === "UP" ? this.buyCostUp : this.buyCostDown;
-        const reserved = this.pendingBuyNotional(leg, excludeKey);
-        const available = this.cfg.maxUsdcPerLeg - spent - reserved;
-        if (available <= 0) return 0;
-        return available / price;
+        return decision.quotes as Quote[];
     }
 
     private pendingBuyNotional(leg: Leg, excludeKey?: OrderKey): number {
