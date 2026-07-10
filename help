@@ -1,0 +1,20 @@
+# 采集数据
+npm run collect:btc5m-history -- --duration-minutes 30 --out-dir data
+
+| 字段 | 含义 |
+|---|---|
+| `timestamp` | ISO 时间字符串，例如 `2026-07-10T16:49:29.490Z`。 |
+| `timestamp_ms` | 同一时间的毫秒时间戳，方便程序排序/计算。 |
+| `slug` | Polymarket 市场标识，例如 `btc-updown-5m-1779001800`。 |
+| `condition_id` | Polymarket 条件市场 ID，用来唯一标识这个预测市场。 |
+| `btc_price` | 外部 BTC 现货价格。现在默认关闭外部源，所以通常为空。 |
+| `open_price` | 当前 5 分钟周期开始时的 BTC 价格。外部 BTC 源关闭时通常为空。 |
+| `seconds_left` | 当前 5 分钟市场距离结束还有多少秒。 |
+| `up_bid` | `UP` 合约当前最高买价。别人愿意买 UP 的最高价格。 |
+| `up_ask` | `UP` 合约当前最低卖价。你立刻买 UP 大概率要付的价格。 |
+| `up_mid` | `UP` 中间价，通常是 `(up_bid + up_ask) / 2`。 |
+| `down_bid` | `DOWN` 合约当前最高买价。别人愿意买 DOWN 的最高价格。 |
+| `down_ask` | `DOWN` 合约当前最低卖价。你立刻买 DOWN 大概率要付的价格。 |
+| `down_mid` | `DOWN` 中间价，通常是 `(down_bid + down_ask) / 2`。 |
+| `up_token_id` | `UP` 合约的 CLOB token id，下单/查历史价格会用到。 |
+| `down_token_id` | `DOWN` 合约的 CLOB token id。 |

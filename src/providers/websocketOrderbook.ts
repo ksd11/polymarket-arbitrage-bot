@@ -29,6 +29,15 @@ export interface TokenPrice {
 }
 
 type PriceUpdateCallback = (tokenId: string, price: TokenPrice) => void;
+export type MarketResolvedPayload = {
+    market: string;
+    assetIds: string[];
+    winningAssetId: string;
+    winningOutcome: string;
+    timestamp: number;
+    raw: any;
+};
+type MarketResolvedCallback = (payload: MarketResolvedPayload) => void;
 
 export class WebSocketOrderBook {
     private ws: WebSocket | null = null;
@@ -37,6 +46,7 @@ export class WebSocketOrderBook {
     private assetIds: string[];
     private auth: ApiKeyCreds | null;
     private priceCallbacks: Map<string, PriceUpdateCallback> = new Map();
+    private marketResolvedCallbacks: Set<MarketResolvedCallback> = new Set();
     private tokenPrices: Map<string, TokenPrice> = new Map();
     public subscribedAssetIds: Set<string> = new Set();
     private tokenLabels: Map<string, string> = new Map(); // Map tokenId to "Up" or "Down"
@@ -77,6 +87,14 @@ export class WebSocketOrderBook {
      */
     offPriceUpdate(tokenId: string): void {
         this.priceCallbacks.delete(tokenId);
+    }
+
+    onMarketResolved(callback: MarketResolvedCallback): void {
+        this.marketResolvedCallbacks.add(callback);
+    }
+
+    offMarketResolved(callback: MarketResolvedCallback): void {
+        this.marketResolvedCallbacks.delete(callback);
     }
 
     /**
@@ -281,6 +299,11 @@ export class WebSocketOrderBook {
                 return;
             }
 
+            if (parsed.event_type === "market_resolved") {
+                this.handleMarketResolved(parsed);
+                return;
+            }
+
             // Handle legacy orderbook updates (fallback)
             if (parsed.type === "l2_orderbook" || parsed.type === "orderbook") {
                 this.handleOrderBookUpdate(parsed);
@@ -305,6 +328,23 @@ export class WebSocketOrderBook {
             }
         } catch (error) {
             logger.error(`Error parsing WebSocket message: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+
+    private handleMarketResolved(message: any): void {
+        const winningAssetId = String(message.winning_asset_id || "");
+        const payload: MarketResolvedPayload = {
+            market: String(message.market || ""),
+            assetIds: Array.isArray(message.assets_ids) ? message.assets_ids.map(String) : [],
+            winningAssetId,
+            winningOutcome: String(message.winning_outcome || ""),
+            timestamp: message.timestamp ? parseInt(message.timestamp, 10) : Date.now(),
+            raw: message,
+        };
+
+        logger.info(`🏁 Market resolved: winner=${payload.winningOutcome || payload.winningAssetId}`);
+        for (const callback of this.marketResolvedCallbacks) {
+            callback(payload);
         }
     }
 
@@ -516,4 +556,3 @@ export async function getWebSocketOrderBook(
 
 // Import config for debug flag
 import { config } from "../config";
-

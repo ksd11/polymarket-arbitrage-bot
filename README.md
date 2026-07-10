@@ -144,12 +144,15 @@ Collect BTC 5m history:
 npm run collect:btc5m-history -- --duration-minutes 120 --out-dir data
 ```
 
-This writes live samples to `data/btc5m-history.csv` by default. Each row includes BTC price, cycle open price, Polymarket UP/DOWN bid/ask/mid, token IDs, and market slug. Set `--duration-minutes 0` to run continuously.
+This writes live samples to `data/btc5m-history.csv` by default. It is Polymarket-only unless `COLLECT_BTC_PRICE_ENABLED=true`; each row includes Polymarket UP/DOWN bid/ask/mid, token IDs, market slug, resolution winner when available, and optional BTC/open prices. Set `--duration-minutes 0` to run continuously.
+
+If external BTC price collection is enabled and one source is blocked, the collector automatically tries the next source from `COLLECT_BTC_PRICE_URLS` / `--btc-price-urls`. Separate multiple URLs with `|`.
 
 Expected CSV columns:
 ```csv
-timestamp,btc_price,up_ask,down_ask
-2026-07-11T00:00:05.000Z,58200.12,0.51,0.50
+row_type,timestamp,btc_price,open_price,up_ask,down_ask,winning_outcome
+sample,2026-07-11T00:00:05.000Z,,,0.51,0.50,
+resolution,2026-07-11T00:05:02.000Z,,,0.99,0.01,Up
 ```
 
 Optional columns:
