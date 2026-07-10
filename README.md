@@ -136,8 +136,10 @@ Useful `.env` knobs:
 
 BTC 5m edge backtest:
 ```bash
-npm run backtest:btc5m -- --csv data/btc5m-history.csv
+npm run backtest:btc5m -- --strategy edge --csv data/btc5m-history.csv
 ```
+
+`--strategy` and `--csv` are required. The current `edge` strategy needs `btc_price` and `open_price`; Polymarket-only CSVs with only `winning_outcome` are useful for the next settlement/盘口-based strategy.
 
 Collect BTC 5m history:
 ```bash
@@ -160,6 +162,7 @@ Optional columns:
 - `open_price` — BTC price at cycle open. If omitted, the first row in each cycle is used.
 
 Backtest knobs:
+- `BACKTEST_STRATEGY` — Strategy name. Currently supported: `edge`.
 - `BACKTEST_MIN_EDGE` — Minimum `fairProbability - askPrice` needed to buy. Default `0.03`.
 - `BACKTEST_ORDER_USDC` — USDC per simulated buy. Default `5`.
 - `BACKTEST_MAX_USDC_PER_LEG` — Max UP or DOWN spend per cycle. Default `10`.

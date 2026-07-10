@@ -18,3 +18,6 @@ npm run collect:btc5m-history -- --duration-minutes 30 --out-dir data
 | `down_mid` | `DOWN` 中间价，通常是 `(down_bid + down_ask) / 2`。 |
 | `up_token_id` | `UP` 合约的 CLOB token id，下单/查历史价格会用到。 |
 | `down_token_id` | `DOWN` 合约的 CLOB token id。 |
+
+# 回测
+npm run backtest:btc5m -- --strategy edge --csv /tmp/btc5m-backtest-sample.csv

@@ -2,8 +2,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, resolve } from "path";
 
 type Leg = "UP" | "DOWN";
+type BacktestStrategy = "edge";
 
 type BacktestConfig = {
+    strategy: BacktestStrategy;
     csvPath: string;
     outputTradesPath: string;
     intervalMinutes: number;
@@ -58,6 +60,10 @@ function getArgValue(name: string): string | undefined {
     return withEquals?.slice(name.length + 1);
 }
 
+function hasArg(name: string): boolean {
+    return process.argv.includes(name);
+}
+
 function envString(name: string, fallback: string): string {
     const value = process.env[name]?.trim();
     return value ? value : fallback;
@@ -70,9 +76,38 @@ function envNumber(name: string, fallback: number): number {
     return Number.isFinite(value) ? value : fallback;
 }
 
+function usage(): string {
+    return [
+        "Usage:",
+        "  npm run backtest:btc5m -- --strategy edge --csv <path>",
+        "",
+        "Required:",
+        "  --strategy edge     Backtest strategy name. Currently supported: edge",
+        "  --csv <path>        Historical CSV file, e.g. data/btc5m-history.csv",
+        "",
+        "Optional:",
+        "  --out <path>                 Trades output CSV",
+        "  --min-edge <number>          Default: BACKTEST_MIN_EDGE or 0.03",
+        "  --order-usdc <number>        Default: BACKTEST_ORDER_USDC or 5",
+        "  --max-usdc-per-leg <number>  Default: BACKTEST_MAX_USDC_PER_LEG or 10",
+    ].join("\n");
+}
+
+function parseStrategy(value: string | undefined): BacktestStrategy {
+    if (value === "edge") return value;
+    throw new Error(`Unsupported or missing strategy: ${value || "(empty)"}\n\n${usage()}`);
+}
+
 function loadConfig(): BacktestConfig {
+    if (hasArg("--help") || hasArg("-h")) {
+        console.log(usage());
+        process.exit(0);
+    }
+
+    const strategyArg = getArgValue("--strategy") ?? envString("BACKTEST_STRATEGY", "");
     const csvPath = getArgValue("--csv") ?? envString("BACKTEST_CSV", "");
     const cfg: BacktestConfig = {
+        strategy: parseStrategy(strategyArg),
         csvPath,
         outputTradesPath: getArgValue("--out") ?? envString("BACKTEST_TRADES_OUT", "logs/backtest-btc5m-trades.csv"),
         intervalMinutes: Number(getArgValue("--interval-minutes") ?? envNumber("BACKTEST_INTERVAL_MINUTES", 5)),
@@ -84,7 +119,7 @@ function loadConfig(): BacktestConfig {
         maxPrice: Number(getArgValue("--max-price") ?? envNumber("BACKTEST_MAX_PRICE", 0.98)),
     };
 
-    if (!cfg.csvPath) throw new Error("Missing --csv <path> or BACKTEST_CSV");
+    if (!cfg.csvPath) throw new Error(`Missing --csv <path> or BACKTEST_CSV\n\n${usage()}`);
     if (cfg.intervalMinutes <= 0) throw new Error("BACKTEST_INTERVAL_MINUTES must be > 0");
     if (cfg.volPerInterval <= 0) throw new Error("BACKTEST_VOL_PER_INTERVAL must be > 0");
     if (cfg.minEdge < 0) throw new Error("BACKTEST_MIN_EDGE must be >= 0");
@@ -315,6 +350,7 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
     const roi = totalCost > 0 ? totalPnl / totalCost : 0;
 
     console.log("=== BTC 5m Edge Backtest ===");
+    console.log(`Strategy: ${cfg.strategy}`);
     console.log(`CSV: ${cfg.csvPath}`);
     console.log(`Cycles: ${cycles.length}, traded cycles: ${tradedCycles}`);
     console.log(`Trades: ${trades.length}, winners: ${winners}, win rate: ${trades.length ? (winners / trades.length * 100).toFixed(2) : "0.00"}%`);
@@ -329,8 +365,7 @@ function main(): void {
     if (!existsSync(csvPath)) throw new Error(`CSV file not found: ${csvPath}`);
 
     const records = parseCsv(readFileSync(csvPath, "utf-8"));
-    const rows = toMarketRows(records, cfg.intervalMinutes);
-    const { cycles, trades } = runBacktest(rows, cfg);
+    const { cycles, trades } = runStrategy(cfg, records);
 
     const outPath = resolve(cfg.outputTradesPath);
     mkdirSync(dirname(outPath), { recursive: true });
@@ -338,4 +373,20 @@ function main(): void {
     printSummary(cycles, trades, cfg);
 }
 
-main();
+function runStrategy(cfg: BacktestConfig, records: Record<string, string>[]): { cycles: CycleState[]; trades: Trade[] } {
+    switch (cfg.strategy) {
+        case "edge": {
+            const rows = toMarketRows(records, cfg.intervalMinutes);
+            return runBacktest(rows, cfg);
+        }
+        default:
+            throw new Error(`Unsupported strategy: ${cfg.strategy}`);
+    }
+}
+
+try {
+    main();
+} catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+}
