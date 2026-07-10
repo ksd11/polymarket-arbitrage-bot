@@ -251,24 +251,31 @@ function parseTimestamp(value: string | undefined): number | undefined {
 
 function toMarketRows(records: Record<string, string>[], intervalMinutes: number): MarketRow[] {
     const intervalMs = intervalMinutes * 60_000;
-    return records.map((record, idx) => {
-        const timestampMs = parseTimestamp(pick(record, ["timestamp", "time", "ts", "datetime", "date"]));
+    const result: MarketRow[] = [];
+    for (let idx = 0; idx < records.length; idx++) {
+        const record = records[idx];
+        const timestampMs = parseTimestamp(pick(record, ["timestamp_ms", "timestamp", "time", "ts", "datetime", "date"]));
         const btcPrice = parseNumber(pick(record, ["btc_price", "btc", "index_price", "underlying_price", "price"]));
         const upAsk = parseNumber(pick(record, ["up_ask", "ask_up", "upask", "yes_ask"]));
         const downAsk = parseNumber(pick(record, ["down_ask", "ask_down", "downask", "no_ask"]));
-        if (timestampMs === undefined || upAsk === undefined || downAsk === undefined) {
-            throw new Error(`CSV row ${idx + 2} missing required timestamp/upAsk/downAsk`);
+        if (timestampMs === undefined) {
+            continue; // skip rows with missing timestamp
+        }
+        if (upAsk === undefined || downAsk === undefined) {
+            // Still include resolution rows or rows that can update winner/finalPrice
+            const rowType = pick(record, ["row_type", "type"]) ?? "sample";
+            if (rowType !== "resolution") continue;
         }
         const startMs = Math.floor(timestampMs / intervalMs) * intervalMs;
         const upTokenId = pick(record, ["up_token_id", "up_token", "yes_token_id"]);
         const downTokenId = pick(record, ["down_token_id", "down_token", "no_token_id"]);
-        return {
+        result.push({
             timestampMs,
             rowType: pick(record, ["row_type", "type"]) ?? "sample",
             slug: pick(record, ["slug", "market", "market_slug"]) ?? `cycle-${Math.floor(startMs / 1000)}`,
             btcPrice,
-            upAsk,
-            downAsk,
+            upAsk: upAsk ?? 0,
+            downAsk: downAsk ?? 0,
             upBid: parseNumber(pick(record, ["up_bid", "bid_up", "upbid", "yes_bid"])),
             downBid: parseNumber(pick(record, ["down_bid", "bid_down", "downbid", "no_bid"])),
             upMid: parseNumber(pick(record, ["up_mid", "mid_up", "upmid", "yes_mid"])),
@@ -278,8 +285,9 @@ function toMarketRows(records: Record<string, string>[], intervalMinutes: number
             winningAssetId: pick(record, ["winning_asset_id", "winning_token_id"]),
             upTokenId,
             downTokenId,
-        };
-    }).sort((a, b) => a.timestampMs - b.timestampMs);
+        });
+    }
+    return result.sort((a, b) => a.timestampMs - b.timestampMs);
 }
 
 function parseWinningOutcome(value: string | undefined): Leg | undefined {
@@ -314,6 +322,7 @@ function runBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleSta
 
         const secondsLeft = (cycle.endMs - row.timestampMs) / 1000;
         if (secondsLeft < cfg.minSecondsLeft) continue;
+        if (row.btcPrice === undefined || cycle.openPrice === undefined) continue;
 
         const decision = buildBtc5mEdgeOrders({
             timestampMs: row.timestampMs,
