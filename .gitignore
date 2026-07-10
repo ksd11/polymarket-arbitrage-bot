@@ -2,6 +2,7 @@ node_modules
 dist
 .env
 logs
+data
 src/data
 analyse
 report

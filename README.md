@@ -134,6 +134,34 @@ Useful `.env` knobs:
 - `MM_ENABLE_SELL_EXCESS` — Places SELL quotes for excess one-sided inventory. Default `true`.
 - `MM_INTERVAL_MINUTES`, `MM_MARKET`, `MM_TICK_SIZE`, `MM_NEG_RISK` — Same idea as the range-arb settings.
 
+BTC 5m edge backtest:
+```bash
+npm run backtest:btc5m -- --csv data/btc5m-history.csv
+```
+
+Collect BTC 5m history:
+```bash
+npm run collect:btc5m-history -- --duration-minutes 120 --out-dir data
+```
+
+This writes live samples to `data/btc5m-history.csv` by default. Each row includes BTC price, cycle open price, Polymarket UP/DOWN bid/ask/mid, token IDs, and market slug. Set `--duration-minutes 0` to run continuously.
+
+Expected CSV columns:
+```csv
+timestamp,btc_price,up_ask,down_ask
+2026-07-11T00:00:05.000Z,58200.12,0.51,0.50
+```
+
+Optional columns:
+- `slug` — Market/cycle id. If omitted, the backtester groups rows by 5-minute timestamp.
+- `open_price` — BTC price at cycle open. If omitted, the first row in each cycle is used.
+
+Backtest knobs:
+- `BACKTEST_MIN_EDGE` — Minimum `fairProbability - askPrice` needed to buy. Default `0.03`.
+- `BACKTEST_ORDER_USDC` — USDC per simulated buy. Default `5`.
+- `BACKTEST_MAX_USDC_PER_LEG` — Max UP or DOWN spend per cycle. Default `10`.
+- `BACKTEST_VOL_PER_INTERVAL` — Assumed BTC volatility over one 5m interval. Default `0.0015`.
+
 ## Files
 
 - `src/data/copytrade-state.json` — Bot state (prices, condition IDs, market info)

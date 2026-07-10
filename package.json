@@ -7,6 +7,8 @@
     "start": "tsx src/index.ts",
     "btc5m:range-arb": "tsx src/btc-5m-range-arb.ts",
     "btc5m:market-maker": "tsx src/btc-5m-market-maker.ts",
+    "backtest:btc5m": "tsx src/backtest/btc-5m-edge-backtest.ts",
+    "collect:btc5m-history": "tsx src/collect/btc-5m-history.ts",
     "redeem": "tsx src/redeem.ts",
     "redeem:holdings": "tsx src/redeem-holdings.ts",
     "redeem:proxy": "tsx src/redeem-proxy.ts",
