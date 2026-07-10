@@ -87,7 +87,7 @@ function loadConfig(): CollectConfig {
     const durationMs = Number(getArgValue("--duration-ms") ?? (durationMinutes > 0 ? durationMinutes * 60_000 : 0));
     const outDir = getArgValue("--out-dir") ?? envString("COLLECT_OUT_DIR", "data");
     const outFile = getArgValue("--out-file") ?? envString("COLLECT_OUT_FILE", "btc5m-history.csv");
-    const btcPriceEnabled = (getArgValue("--btc-price-enabled") ?? String(envBool("COLLECT_BTC_PRICE_ENABLED", false))).toLowerCase() === "true";
+    const btcPriceEnabled = (getArgValue("--btc-price-enabled") ?? String(envBool("COLLECT_BTC_PRICE_ENABLED", true))).toLowerCase() === "true";
     const priceUrls = getArgValue("--btc-price-urls")
         ?? getArgValue("--btc-price-url")
         ?? envString(
