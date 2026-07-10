@@ -116,6 +116,24 @@ ts-node src/auto-redeem.ts --api    # fetch from API
 ts-node src/auto-redeem.ts --dry-run
 ```
 
+BTC 5m market maker:
+```bash
+npm run btc5m:market-maker
+```
+
+The market-maker strategy is a dynamic version of the fixed-price `btc5m:range-arb` idea. It continuously quotes both UP and DOWN bids around a fair price, only keeps the paired bid cost below `1 - MM_MIN_LOCKED_EDGE`, and skews quotes away from whichever side has too much inventory.
+
+Useful `.env` knobs:
+- `MM_DRY_RUN` — Default `true`; set to `false` only when you are ready to post real orders.
+- `MM_QUOTE_SHARES` — Shares per quote. Default `5`.
+- `MM_MAX_USDC_PER_LEG` — Max USDC to spend buying UP or DOWN in each 5m round. Default `0` means unlimited.
+- `MM_QUOTE_SPREAD` — Total width around fair value. Default `0.06`, so bids are roughly 3 cents below fair.
+- `MM_MIN_LOCKED_EDGE` — Minimum theoretical edge when both BUY legs fill. Default `0.02`.
+- `MM_INVENTORY_SKEW_PER_SHARE` — Price skew per excess share. Default `0.002`.
+- `MM_MAX_INVENTORY_SHARES` — Stops adding paired bids once inventory reaches this cap. Default `30`.
+- `MM_ENABLE_SELL_EXCESS` — Places SELL quotes for excess one-sided inventory. Default `true`.
+- `MM_INTERVAL_MINUTES`, `MM_MARKET`, `MM_TICK_SIZE`, `MM_NEG_RISK` — Same idea as the range-arb settings.
+
 ## Files
 
 - `src/data/copytrade-state.json` — Bot state (prices, condition IDs, market info)
