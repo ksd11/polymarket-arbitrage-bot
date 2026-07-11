@@ -16,6 +16,8 @@ type BacktestConfig = {
     intervalMinutes: number;
     volPerInterval: number;
     minEdge: number;
+    edgeMinMoveBps: number;
+    edgeMinElapsedSeconds: number;
     orderUsdc: number;
     maxUsdcPerLeg: number;
     minSecondsLeft: number;
@@ -122,6 +124,8 @@ function usage(): string {
         "Optional:",
         "  --out <path>                 Trades output CSV",
         "  --min-edge <number>          Default: BACKTEST_MIN_EDGE or 0.03",
+        "  --edge-min-move-bps <number> Default: BACKTEST_EDGE_MIN_MOVE_BPS or 0",
+        "  --edge-min-elapsed <seconds>  Default: BACKTEST_EDGE_MIN_ELAPSED_SECONDS or 0",
         "  --order-usdc <number>        Default: BACKTEST_ORDER_USDC or 5",
         "  --max-usdc-per-leg <number>  Default: BACKTEST_MAX_USDC_PER_LEG or 10",
     ].join("\n");
@@ -150,6 +154,8 @@ function loadConfig(): BacktestConfig {
         intervalMinutes: Number(getArgValue("--interval-minutes") ?? envNumber("BACKTEST_INTERVAL_MINUTES", 5)),
         volPerInterval: Number(getArgValue("--vol-per-interval") ?? envNumber("BACKTEST_VOL_PER_INTERVAL", 0.0015)),
         minEdge: Number(getArgValue("--min-edge") ?? envNumber("BACKTEST_MIN_EDGE", 0.03)),
+        edgeMinMoveBps: Number(getArgValue("--edge-min-move-bps") ?? envNumber("BACKTEST_EDGE_MIN_MOVE_BPS", 0)),
+        edgeMinElapsedSeconds: Number(getArgValue("--edge-min-elapsed") ?? envNumber("BACKTEST_EDGE_MIN_ELAPSED_SECONDS", 0)),
         orderUsdc: Number(getArgValue("--order-usdc") ?? envNumber("BACKTEST_ORDER_USDC", 5)),
         maxUsdcPerLeg: Number(getArgValue("--max-usdc-per-leg") ?? envNumber("BACKTEST_MAX_USDC_PER_LEG", 10)),
         minSecondsLeft: Number(getArgValue("--min-seconds-left") ?? envNumber("BACKTEST_MIN_SECONDS_LEFT", 10)),
@@ -173,6 +179,8 @@ function loadConfig(): BacktestConfig {
     if (cfg.intervalMinutes <= 0) throw new Error("BACKTEST_INTERVAL_MINUTES must be > 0");
     if (cfg.volPerInterval <= 0) throw new Error("BACKTEST_VOL_PER_INTERVAL must be > 0");
     if (cfg.minEdge < 0) throw new Error("BACKTEST_MIN_EDGE must be >= 0");
+    if (cfg.edgeMinMoveBps < 0) throw new Error("BACKTEST_EDGE_MIN_MOVE_BPS must be >= 0");
+    if (cfg.edgeMinElapsedSeconds < 0) throw new Error("BACKTEST_EDGE_MIN_ELAPSED_SECONDS must be >= 0");
     if (cfg.orderUsdc <= 0) throw new Error("BACKTEST_ORDER_USDC must be > 0");
     if (cfg.maxUsdcPerLeg < 0) throw new Error("BACKTEST_MAX_USDC_PER_LEG must be >= 0");
     if (cfg.minSecondsLeft < 0) throw new Error("BACKTEST_MIN_SECONDS_LEFT must be >= 0");
@@ -349,6 +357,8 @@ function runBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleSta
                 intervalMinutes: cfg.intervalMinutes,
                 volPerInterval: cfg.volPerInterval,
                 minEdge: cfg.minEdge,
+                minMoveBps: cfg.edgeMinMoveBps,
+                minElapsedSeconds: cfg.edgeMinElapsedSeconds,
                 orderUsdc: cfg.orderUsdc,
                 maxUsdcPerLeg: cfg.maxUsdcPerLeg,
                 maxPrice: cfg.maxPrice,
@@ -617,6 +627,8 @@ function runHybridBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: Cy
                     intervalMinutes: cfg.intervalMinutes,
                     volPerInterval: cfg.volPerInterval,
                     minEdge: cfg.minEdge,
+                    minMoveBps: cfg.edgeMinMoveBps,
+                    minElapsedSeconds: cfg.edgeMinElapsedSeconds,
                     orderUsdc: cfg.orderUsdc,
                     maxUsdcPerLeg: cfg.maxUsdcPerLeg,
                     maxPrice: cfg.maxPrice,

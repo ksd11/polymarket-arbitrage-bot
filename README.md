@@ -169,6 +169,8 @@ Optional columns:
 Backtest knobs:
 - `BACKTEST_STRATEGY` — Strategy name. Supported: `edge`, `btc5m:edge`, `range-arb`, `market-maker`, `btc5m:range-arb`, `btc5m:market-maker`.
 - `BACKTEST_MIN_EDGE` — Minimum `fairProbability - askPrice` needed to buy. Default `0.03`.
+- `BACKTEST_EDGE_MIN_MOVE_BPS` — Minimum BTC move from cycle open, in basis points, before edge can trade. Default `0`.
+- `BACKTEST_EDGE_MIN_ELAPSED_SECONDS` — Minimum seconds after cycle start before edge can trade. Default `0`.
 - `BACKTEST_ORDER_USDC` — USDC per simulated buy. Default `5`.
 - `BACKTEST_MAX_USDC_PER_LEG` — Max UP or DOWN spend per cycle. Default `10`.
 - `BACKTEST_VOL_PER_INTERVAL` — Assumed BTC volatility over one 5m interval. Default `0.0015`.

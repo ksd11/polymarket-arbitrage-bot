@@ -7,6 +7,8 @@ export type Btc5mEdgeParams = {
     orderUsdc: number;
     maxUsdcPerLeg: number;
     maxPrice: number;
+    minMoveBps?: number;
+    minElapsedSeconds?: number;
 };
 
 export type Btc5mEdgeInput = {
@@ -28,6 +30,14 @@ export function buildBtc5mEdgeOrders(input: Btc5mEdgeInput): Btc5mStrategyDecisi
     const fairUp = fairUpProbability(input.btcPrice, input.openPrice, input.endMs - input.timestampMs, input.params);
     const fairDown = 1 - fairUp;
     const quotes: Btc5mStrategyQuote[] = [];
+    const elapsedSeconds = input.params.intervalMinutes * 60 - Math.max(0, (input.endMs - input.timestampMs) / 1000);
+    if (elapsedSeconds < (input.params.minElapsedSeconds ?? 0)) {
+        return { quotes, fairUp, fairDown, reason: "edge skip: too early" };
+    }
+    const moveBps = Math.abs((input.btcPrice - input.openPrice) / input.openPrice) * 10_000;
+    if (moveBps < (input.params.minMoveBps ?? 0)) {
+        return { quotes, fairUp, fairDown, reason: "edge skip: BTC move too small" };
+    }
     maybeBuy(quotes, "UP", input.upAsk, fairUp, input.spentUp, input.params);
     maybeBuy(quotes, "DOWN", input.downAsk, fairDown, input.spentDown, input.params);
     return { quotes, fairUp, fairDown };

@@ -27,6 +27,8 @@ type HybridConfig = {
     // Edge params
     volPerInterval: number;
     minEdge: number;
+    minMoveBps: number;
+    minElapsedSeconds: number;
     orderUsdc: number;
     maxUsdcPerLeg: number;
     maxPrice: number;
@@ -94,6 +96,8 @@ function loadHybridConfig(): HybridConfig {
         // Edge params
         volPerInterval: envNumber("HYBRID_VOL_PER_INTERVAL", 0.0006),
         minEdge: envNumber("HYBRID_MIN_EDGE", 0.10),
+        minMoveBps: envNumber("HYBRID_EDGE_MIN_MOVE_BPS", 0),
+        minElapsedSeconds: envNumber("HYBRID_EDGE_MIN_ELAPSED_SECONDS", 0),
         orderUsdc: envNumber("HYBRID_ORDER_USDC", 5),
         maxUsdcPerLeg: envNumber("HYBRID_MAX_USDC_PER_LEG", 10),
         maxPrice: envNumber("HYBRID_MAX_PRICE", 0.85),
@@ -115,6 +119,8 @@ function loadHybridConfig(): HybridConfig {
     if (cfg.intervalMinutes <= 0) throw new Error("HYBRID_INTERVAL_MINUTES must be > 0");
     if (!(cfg.volPerInterval > 0)) throw new Error("HYBRID_VOL_PER_INTERVAL must be > 0");
     if (cfg.minEdge < 0) throw new Error("HYBRID_MIN_EDGE must be >= 0");
+    if (cfg.minMoveBps < 0) throw new Error("HYBRID_EDGE_MIN_MOVE_BPS must be >= 0");
+    if (cfg.minElapsedSeconds < 0) throw new Error("HYBRID_EDGE_MIN_ELAPSED_SECONDS must be >= 0");
     if (cfg.orderUsdc <= 0) throw new Error("HYBRID_ORDER_USDC must be > 0");
     if (!(cfg.rangePriceX > 0 && cfg.rangePriceX < 0.5)) throw new Error("HYBRID_RANGE_PRICE_X must be > 0 and < 0.5");
     return cfg;
@@ -322,6 +328,8 @@ class BtcFiveMinuteHybridBot {
                     intervalMinutes: this.cfg.intervalMinutes,
                     volPerInterval: this.cfg.volPerInterval,
                     minEdge: this.cfg.minEdge,
+                    minMoveBps: this.cfg.minMoveBps,
+                    minElapsedSeconds: this.cfg.minElapsedSeconds,
                     orderUsdc: this.cfg.orderUsdc,
                     maxUsdcPerLeg: this.cfg.maxUsdcPerLeg,
                     maxPrice: this.cfg.maxPrice,

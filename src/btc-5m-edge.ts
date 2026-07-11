@@ -23,6 +23,8 @@ type EdgeConfig = {
     intervalMinutes: number;
     volPerInterval: number;
     minEdge: number;
+    minMoveBps: number;
+    minElapsedSeconds: number;
     orderUsdc: number;
     maxUsdcPerLeg: number;
     maxPrice: number;
@@ -80,6 +82,8 @@ function loadEdgeConfig(): EdgeConfig {
         intervalMinutes: envNumber("EDGE_INTERVAL_MINUTES", 5),
         volPerInterval: envNumber("EDGE_VOL_PER_INTERVAL", 0.001),
         minEdge: envNumber("EDGE_MIN_EDGE", 0.05),
+        minMoveBps: envNumber("EDGE_MIN_MOVE_BPS", 0),
+        minElapsedSeconds: envNumber("EDGE_MIN_ELAPSED_SECONDS", 0),
         orderUsdc: envNumber("EDGE_ORDER_USDC", 5),
         maxUsdcPerLeg: envNumber("EDGE_MAX_USDC_PER_LEG", 20),
         maxPrice: envNumber("EDGE_MAX_PRICE", 0.85),
@@ -94,6 +98,8 @@ function loadEdgeConfig(): EdgeConfig {
     if (cfg.intervalMinutes <= 0) throw new Error("EDGE_INTERVAL_MINUTES must be > 0");
     if (!(cfg.volPerInterval > 0)) throw new Error("EDGE_VOL_PER_INTERVAL must be > 0");
     if (!(cfg.minEdge > 0 && cfg.minEdge < 1)) throw new Error("EDGE_MIN_EDGE must be > 0 and < 1");
+    if (cfg.minMoveBps < 0) throw new Error("EDGE_MIN_MOVE_BPS must be >= 0");
+    if (cfg.minElapsedSeconds < 0) throw new Error("EDGE_MIN_ELAPSED_SECONDS must be >= 0");
     if (!(cfg.orderUsdc > 0)) throw new Error("EDGE_ORDER_USDC must be > 0");
     if (cfg.maxUsdcPerLeg < 0) throw new Error("EDGE_MAX_USDC_PER_LEG must be >= 0");
     if (!(cfg.maxPrice > 0 && cfg.maxPrice <= 1)) throw new Error("EDGE_MAX_PRICE must be > 0 and <= 1");
@@ -299,6 +305,8 @@ class BtcFiveMinuteEdgeBot {
             intervalMinutes: this.cfg.intervalMinutes,
             volPerInterval: this.cfg.volPerInterval,
             minEdge: this.cfg.minEdge,
+            minMoveBps: this.cfg.minMoveBps,
+            minElapsedSeconds: this.cfg.minElapsedSeconds,
             orderUsdc: this.cfg.orderUsdc,
             maxUsdcPerLeg: this.cfg.maxUsdcPerLeg,
             maxPrice: this.cfg.maxPrice,

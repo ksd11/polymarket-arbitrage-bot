@@ -123,21 +123,5 @@ export function buildBtc5mHybridOrders(input: Btc5mHybridInput): Btc5mStrategyDe
         return { ...decision, regime, reason: `regime=trending → edge` };
     }
 
-    // Unknown or missing data: fall back to edge if possible, else do nothing
-    if (input.btcPrice !== undefined && input.openPrice !== undefined) {
-        const decision = buildBtc5mEdgeOrders({
-            timestampMs: input.timestampMs,
-            endMs: input.endMs,
-            btcPrice: input.btcPrice,
-            openPrice: input.openPrice,
-            upAsk: input.upAsk,
-            downAsk: input.downAsk,
-            spentUp: input.spentUp,
-            spentDown: input.spentDown,
-            params: input.params.edge,
-        });
-        return { ...decision, regime, reason: `regime=unknown → edge fallback` };
-    }
-
-    return { quotes: [], regime, reason: `regime=${regime}, no btcPrice → skip` };
+    return { quotes: [], regime, reason: `regime=${regime} → skip` };
 }
