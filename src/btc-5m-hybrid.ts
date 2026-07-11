@@ -89,20 +89,20 @@ function envBool(name: string, fallback: boolean): boolean {
 function loadHybridConfig(): HybridConfig {
     const cfg: HybridConfig = {
         dryRun: envBool("HYBRID_DRY_RUN", true),
-        market: envString("HYBRID_MARKET", "btc").toLowerCase(),
-        intervalMinutes: envNumber("HYBRID_INTERVAL_MINUTES", 5),
-        tickSize: envString("HYBRID_TICK_SIZE", "0.01") as CreateOrderOptions["tickSize"],
-        negRisk: envBool("HYBRID_NEG_RISK", config.copytrade.negRisk),
+        market: envString("HYBRID_MARKET", envString("BTC5M_MARKET", "btc")).toLowerCase(),
+        intervalMinutes: envNumber("HYBRID_INTERVAL_MINUTES", envNumber("BTC5M_INTERVAL_MINUTES", 5)),
+        tickSize: envString("HYBRID_TICK_SIZE", envString("BTC5M_TICK_SIZE", "0.01")) as CreateOrderOptions["tickSize"],
+        negRisk: envBool("HYBRID_NEG_RISK", envBool("BTC5M_NEG_RISK", config.copytrade.negRisk)),
         // Edge params
         volPerInterval: envNumber("HYBRID_VOL_PER_INTERVAL", 0.0006),
         minEdge: envNumber("HYBRID_MIN_EDGE", 0.10),
         minMoveBps: envNumber("HYBRID_EDGE_MIN_MOVE_BPS", 0),
         minElapsedSeconds: envNumber("HYBRID_EDGE_MIN_ELAPSED_SECONDS", 0),
-        orderUsdc: envNumber("HYBRID_ORDER_USDC", 5),
-        maxUsdcPerLeg: envNumber("HYBRID_MAX_USDC_PER_LEG", 10),
+        orderUsdc: envNumber("HYBRID_ORDER_USDC", 3),
+        maxUsdcPerLeg: envNumber("HYBRID_MAX_USDC_PER_LEG", 5),
         maxPrice: envNumber("HYBRID_MAX_PRICE", 0.85),
-        minSecondsLeftToTrade: envNumber("HYBRID_MIN_SECONDS_LEFT_TO_TRADE", 30),
-        cancelSecondsBeforeEnd: envNumber("HYBRID_CANCEL_SECONDS_BEFORE_END", 5),
+        minSecondsLeftToTrade: envNumber("HYBRID_MIN_SECONDS_LEFT_TO_TRADE", envNumber("BTC5M_MIN_SECONDS_LEFT_TO_TRADE", 30)),
+        cancelSecondsBeforeEnd: envNumber("HYBRID_CANCEL_SECONDS_BEFORE_END", envNumber("BTC5M_CANCEL_SECONDS_BEFORE_END", 5)),
         // Range-Arb params
         rangePriceX: envNumber("HYBRID_RANGE_PRICE_X", 0.35),
         rangeUsdcPerLeg: envNumber("HYBRID_RANGE_USDC_PER_LEG", 5),
@@ -112,8 +112,8 @@ function loadHybridConfig(): HybridConfig {
         rangeThreshold: envNumber("HYBRID_RANGE_THRESHOLD", 0.25),
         trendThreshold: envNumber("HYBRID_TREND_THRESHOLD", 0.10),
         // BTC price
-        btcPriceRefreshMs: envNumber("HYBRID_BTC_PRICE_REFRESH_MS", 1000),
-        btcPriceMaxStaleMs: envNumber("HYBRID_BTC_PRICE_MAX_STALE_MS", 10000),
+        btcPriceRefreshMs: envNumber("HYBRID_BTC_PRICE_REFRESH_MS", envNumber("BTC5M_BTC_PRICE_REFRESH_MS", 1000)),
+        btcPriceMaxStaleMs: envNumber("HYBRID_BTC_PRICE_MAX_STALE_MS", envNumber("BTC5M_BTC_PRICE_MAX_STALE_MS", 10000)),
     };
 
     if (cfg.intervalMinutes <= 0) throw new Error("HYBRID_INTERVAL_MINUTES must be > 0");

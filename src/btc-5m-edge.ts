@@ -4,6 +4,8 @@ import "./setup-proxy";
 // Patch Exchange protocol version to V2 (npm package still ships V1)
 import "./patch-exchange-v2";
 
+import { appendFileSync, existsSync, mkdirSync } from "fs";
+import { dirname, resolve } from "path";
 import { ClobClient, CreateOrderOptions, OrderType, Side, UserOrderV2 as UserOrder } from "@polymarket/clob-client-v2";
 import { config } from "./config";
 import { getClobClient } from "./providers/clobclient";
@@ -34,6 +36,8 @@ type EdgeConfig = {
     cancelSecondsBeforeEnd: number;
     btcPriceRefreshMs: number;
     btcPriceMaxStaleMs: number;
+    recordEnabled: boolean;
+    recordPath: string;
 };
 
 type MarketTokens = {
@@ -78,21 +82,23 @@ function envBool(name: string, fallback: boolean): boolean {
 function loadEdgeConfig(): EdgeConfig {
     const cfg: EdgeConfig = {
         dryRun: envBool("EDGE_DRY_RUN", true),
-        market: envString("EDGE_MARKET", "btc").toLowerCase(),
-        intervalMinutes: envNumber("EDGE_INTERVAL_MINUTES", 5),
-        volPerInterval: envNumber("EDGE_VOL_PER_INTERVAL", 0.001),
-        minEdge: envNumber("EDGE_MIN_EDGE", 0.05),
+        market: envString("EDGE_MARKET", envString("BTC5M_MARKET", "btc")).toLowerCase(),
+        intervalMinutes: envNumber("EDGE_INTERVAL_MINUTES", envNumber("BTC5M_INTERVAL_MINUTES", 5)),
+        volPerInterval: envNumber("EDGE_VOL_PER_INTERVAL", 0.002),
+        minEdge: envNumber("EDGE_MIN_EDGE", 0.15),
         minMoveBps: envNumber("EDGE_MIN_MOVE_BPS", 0),
         minElapsedSeconds: envNumber("EDGE_MIN_ELAPSED_SECONDS", 0),
-        orderUsdc: envNumber("EDGE_ORDER_USDC", 5),
-        maxUsdcPerLeg: envNumber("EDGE_MAX_USDC_PER_LEG", 20),
+        orderUsdc: envNumber("EDGE_ORDER_USDC", 3),
+        maxUsdcPerLeg: envNumber("EDGE_MAX_USDC_PER_LEG", 5),
         maxPrice: envNumber("EDGE_MAX_PRICE", 0.85),
-        tickSize: envString("EDGE_TICK_SIZE", "0.01") as CreateOrderOptions["tickSize"],
-        negRisk: envBool("EDGE_NEG_RISK", config.copytrade.negRisk),
-        minSecondsLeftToTrade: envNumber("EDGE_MIN_SECONDS_LEFT_TO_TRADE", 30),
-        cancelSecondsBeforeEnd: envNumber("EDGE_CANCEL_SECONDS_BEFORE_END", 5),
-        btcPriceRefreshMs: envNumber("EDGE_BTC_PRICE_REFRESH_MS", 1000),
-        btcPriceMaxStaleMs: envNumber("EDGE_BTC_PRICE_MAX_STALE_MS", 10000),
+        tickSize: envString("EDGE_TICK_SIZE", envString("BTC5M_TICK_SIZE", "0.01")) as CreateOrderOptions["tickSize"],
+        negRisk: envBool("EDGE_NEG_RISK", envBool("BTC5M_NEG_RISK", config.copytrade.negRisk)),
+        minSecondsLeftToTrade: envNumber("EDGE_MIN_SECONDS_LEFT_TO_TRADE", envNumber("BTC5M_MIN_SECONDS_LEFT_TO_TRADE", 30)),
+        cancelSecondsBeforeEnd: envNumber("EDGE_CANCEL_SECONDS_BEFORE_END", envNumber("BTC5M_CANCEL_SECONDS_BEFORE_END", 5)),
+        btcPriceRefreshMs: envNumber("EDGE_BTC_PRICE_REFRESH_MS", envNumber("BTC5M_BTC_PRICE_REFRESH_MS", 1000)),
+        btcPriceMaxStaleMs: envNumber("EDGE_BTC_PRICE_MAX_STALE_MS", envNumber("BTC5M_BTC_PRICE_MAX_STALE_MS", 10000)),
+        recordEnabled: envBool("EDGE_RECORD_ENABLED", true),
+        recordPath: resolve(envString("EDGE_RECORD_FILE", "data/btc5m-edge-live.csv")),
     };
 
     if (cfg.intervalMinutes <= 0) throw new Error("EDGE_INTERVAL_MINUTES must be > 0");
@@ -168,6 +174,55 @@ function isFinalOrderStatus(status: string): boolean {
     return ["FILLED", "MATCHED", "CANCELLED", "CANCELED", "REJECTED", "FAILED"].includes(status.toUpperCase());
 }
 
+const EDGE_RECORD_HEADERS = [
+    "row_type",
+    "timestamp",
+    "timestamp_ms",
+    "slug",
+    "condition_id",
+    "dry_run",
+    "btc_price",
+    "open_price",
+    "seconds_left",
+    "up_bid",
+    "up_ask",
+    "up_mid",
+    "down_bid",
+    "down_ask",
+    "down_mid",
+    "fair_up",
+    "fair_down",
+    "decision_reason",
+    "quotes",
+    "spent_up",
+    "spent_down",
+    "event_leg",
+    "event_price",
+    "event_size",
+    "event_cost",
+    "order_id",
+    "order_status",
+    "filled_size",
+];
+
+type EdgeRecord = Partial<Record<typeof EDGE_RECORD_HEADERS[number], string | number | boolean>>;
+
+function csvValue(value: string | number | boolean | undefined): string {
+    if (value === undefined) return "";
+    const text = String(value);
+    return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, "\"\"")}"` : text;
+}
+
+function appendEdgeRecord(path: string, record: EdgeRecord): void {
+    mkdirSync(dirname(path), { recursive: true });
+    if (!existsSync(path)) appendFileSync(path, `${EDGE_RECORD_HEADERS.join(",")}\n`);
+    appendFileSync(path, `${EDGE_RECORD_HEADERS.map((header) => csvValue(record[header])).join(",")}\n`);
+}
+
+function formatOptionalNumber(value: number | undefined, digits = 6): string | undefined {
+    return value === undefined || !Number.isFinite(value) ? undefined : value.toFixed(digits);
+}
+
 class BtcFiveMinuteEdgeBot {
     private ws: WebSocketOrderBook | null = null;
     private btcPrice: BtcPriceProvider;
@@ -190,6 +245,7 @@ class BtcFiveMinuteEdgeBot {
 
     async start(): Promise<void> {
         logger.info(`Starting BTC 5m edge bot: market=${this.cfg.market}, vol=${this.cfg.volPerInterval}, minEdge=${this.cfg.minEdge}, orderUsdc=${this.cfg.orderUsdc}, maxUsdcPerLeg=${this.cfg.maxUsdcPerLeg}, dryRun=${this.cfg.dryRun}`);
+        if (this.cfg.recordEnabled) logger.info(`Edge live record CSV: ${this.cfg.recordPath}`);
 
         // Start BTC price provider first
         await this.btcPrice.start();
@@ -335,6 +391,7 @@ class BtcFiveMinuteEdgeBot {
             `fairUp=${fairUpStr} fairDown=${fairDownStr} | upAsk=${upAsk.toFixed(4)} downAsk=${downAsk.toFixed(4)} | ` +
             `secLeft=${secondsLeft.toFixed(0)} | spentUp=${this.spentUp.toFixed(2)} spentDown=${this.spentDown.toFixed(2)}`
         );
+        this.recordDecision(now, secondsLeft, btcPrice, upPrice, downPrice, decision.reason, decision.fairUp, decision.fairDown, decision.quotes);
 
         // Execute any quotes from the decision
         for (const quote of decision.quotes) {
@@ -354,6 +411,7 @@ class BtcFiveMinuteEdgeBot {
             // Track spend even in dry-run for accurate simulation
             if (leg === "UP") this.spentUp += cost;
             else this.spentDown += cost;
+            this.recordOrderEvent("dry_run_order", leg, price, size, cost, undefined, "DRY_RUN", size);
             return;
         }
 
@@ -379,8 +437,10 @@ class BtcFiveMinuteEdgeBot {
             this.orders.push({ leg, orderId, tokenId, price, size, filledSize: 0, status: "NEW" });
             if (leg === "UP") this.spentUp += cost;
             else this.spentDown += cost;
+            this.recordOrderEvent("order_posted", leg, price, size, cost, orderId, "NEW", 0);
         } catch (error) {
             logger.error(`Failed to post BUY ${leg}: ${error instanceof Error ? error.message : String(error)}`);
+            this.recordOrderEvent("order_error", leg, price, size, cost, undefined, "ERROR", 0);
         }
     }
 
@@ -394,6 +454,7 @@ class BtcFiveMinuteEdgeBot {
                 order.status = String((latest as any).status || order.status);
                 order.filledSize = orderFilledSize(latest);
                 logger.info(`Order ${order.leg}: status=${order.status}, filled=${order.filledSize.toFixed(4)}/${order.size.toFixed(4)}`);
+                this.recordOrderEvent("order_update", order.leg, order.price, order.size, order.price * order.size, order.orderId, order.status, order.filledSize);
             } catch (error) {
                 logger.error(`Failed to poll ${order.leg} order ${order.orderId.slice(0, 12)}...: ${error instanceof Error ? error.message : String(error)}`);
             }
@@ -408,10 +469,70 @@ class BtcFiveMinuteEdgeBot {
                 await this.client.cancelOrder({ orderID: order.orderId });
                 order.status = "CANCELLED";
                 logger.info(`Cancelled ${order.leg} order ${order.orderId.slice(0, 12)}... (${reason})`);
+                this.recordOrderEvent("order_cancelled", order.leg, order.price, order.size, order.price * order.size, order.orderId, order.status, order.filledSize);
             } catch (error) {
                 logger.error(`Failed to cancel ${order.leg} order ${order.orderId.slice(0, 12)}...: ${error instanceof Error ? error.message : String(error)}`);
             }
         }
+    }
+
+    private recordDecision(
+        timestampMs: number,
+        secondsLeft: number,
+        btcPrice: number,
+        upPrice: { bestBid?: number; bestAsk?: number; mid?: number },
+        downPrice: { bestBid?: number; bestAsk?: number; mid?: number },
+        reason: string | undefined,
+        fairUp: number | undefined,
+        fairDown: number | undefined,
+        quotes: Array<{ leg: string; price: number; size: number; edge?: number }>,
+    ): void {
+        if (!this.cfg.recordEnabled || !this.tokens) return;
+        appendEdgeRecord(this.cfg.recordPath, {
+            row_type: "decision",
+            timestamp: new Date(timestampMs).toISOString(),
+            timestamp_ms: timestampMs,
+            slug: this.tokens.slug,
+            condition_id: this.tokens.conditionId,
+            dry_run: this.cfg.dryRun,
+            btc_price: btcPrice,
+            open_price: this.openPrice ?? undefined,
+            seconds_left: secondsLeft.toFixed(3),
+            up_bid: formatOptionalNumber(upPrice.bestBid),
+            up_ask: formatOptionalNumber(upPrice.bestAsk),
+            up_mid: formatOptionalNumber(upPrice.mid),
+            down_bid: formatOptionalNumber(downPrice.bestBid),
+            down_ask: formatOptionalNumber(downPrice.bestAsk),
+            down_mid: formatOptionalNumber(downPrice.mid),
+            fair_up: formatOptionalNumber(fairUp),
+            fair_down: formatOptionalNumber(fairDown),
+            decision_reason: reason,
+            quotes: quotes.map((quote) => `${quote.leg}@${quote.price.toFixed(4)}x${quote.size.toFixed(4)} edge=${quote.edge?.toFixed(4) ?? ""}`).join("|"),
+            spent_up: this.spentUp.toFixed(6),
+            spent_down: this.spentDown.toFixed(6),
+        });
+    }
+
+    private recordOrderEvent(rowType: string, leg: "UP" | "DOWN", price: number, size: number, cost: number, orderId: string | undefined, status: string, filledSize: number): void {
+        if (!this.cfg.recordEnabled || !this.tokens) return;
+        appendEdgeRecord(this.cfg.recordPath, {
+            row_type: rowType,
+            timestamp: new Date().toISOString(),
+            timestamp_ms: Date.now(),
+            slug: this.tokens.slug,
+            condition_id: this.tokens.conditionId,
+            dry_run: this.cfg.dryRun,
+            open_price: this.openPrice ?? undefined,
+            spent_up: this.spentUp.toFixed(6),
+            spent_down: this.spentDown.toFixed(6),
+            event_leg: leg,
+            event_price: price.toFixed(6),
+            event_size: size.toFixed(6),
+            event_cost: cost.toFixed(6),
+            order_id: orderId,
+            order_status: status,
+            filled_size: filledSize.toFixed(6),
+        });
     }
 }
 

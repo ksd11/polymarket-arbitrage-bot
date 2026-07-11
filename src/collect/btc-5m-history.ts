@@ -103,8 +103,8 @@ function loadConfig(): CollectConfig {
             )
         );
     const cfg: CollectConfig = {
-        market: (getArgValue("--market") ?? envString("COLLECT_MARKET", "btc")).toLowerCase(),
-        intervalMinutes: Number(getArgValue("--interval-minutes") ?? envNumber("COLLECT_INTERVAL_MINUTES", 5)),
+        market: (getArgValue("--market") ?? envString("COLLECT_MARKET", envString("BTC5M_MARKET", "btc"))).toLowerCase(),
+        intervalMinutes: Number(getArgValue("--interval-minutes") ?? envNumber("COLLECT_INTERVAL_MINUTES", envNumber("BTC5M_INTERVAL_MINUTES", 5))),
         durationMs,
         sampleMs: Number(getArgValue("--sample-ms") ?? envNumber("COLLECT_SAMPLE_MS", 1000)),
         outDir,

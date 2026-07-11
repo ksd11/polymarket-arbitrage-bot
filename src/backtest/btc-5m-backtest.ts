@@ -151,7 +151,7 @@ function loadConfig(): BacktestConfig {
         strategy: parseStrategy(strategyArg),
         csvPath,
         outputTradesPath: getArgValue("--out") ?? envString("BACKTEST_TRADES_OUT", "logs/backtest-btc5m-trades.csv"),
-        intervalMinutes: Number(getArgValue("--interval-minutes") ?? envNumber("BACKTEST_INTERVAL_MINUTES", 5)),
+        intervalMinutes: Number(getArgValue("--interval-minutes") ?? envNumber("BACKTEST_INTERVAL_MINUTES", envNumber("BTC5M_INTERVAL_MINUTES", 5))),
         volPerInterval: Number(getArgValue("--vol-per-interval") ?? envNumber("BACKTEST_VOL_PER_INTERVAL", 0.0015)),
         minEdge: Number(getArgValue("--min-edge") ?? envNumber("BACKTEST_MIN_EDGE", 0.03)),
         edgeMinMoveBps: Number(getArgValue("--edge-min-move-bps") ?? envNumber("BACKTEST_EDGE_MIN_MOVE_BPS", 0)),

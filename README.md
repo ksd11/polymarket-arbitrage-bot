@@ -86,7 +86,10 @@ You don't set `POLY_API_KEY`, `POLY_PASSPHRASE`, etc. — the bot handles that.
 - `DEBUG` — Verbose logs
 - `LOG_FILE_PATH`, `LOG_DIR`, `LOG_FILE_PREFIX` — Where logs go
 
-Full list is in `.env.example`.
+Full list is in `.env.example`. For BTC 5m scripts, config is split into:
+- `BTC5M_*` — common live settings shared by all BTC 5m strategies, such as market, interval, tick size, cancel timing, and BTC price refresh.
+- `EDGE_*`, `HYBRID_*`, `RANGE_ARB_*`, `MM_*` — strategy-specific settings. Strategy-prefixed common vars still work as overrides, e.g. `EDGE_INTERVAL_MINUTES` overrides `BTC5M_INTERVAL_MINUTES` only for `btc5m:edge`.
+- `BACKTEST_*`, `COLLECT_*` — research-only settings for local backtests and history collection.
 
 ## Switching markets
 
@@ -132,17 +135,25 @@ Useful `.env` knobs:
 - `MM_INVENTORY_SKEW_PER_SHARE` — Price skew per excess share. Default `0.002`.
 - `MM_MAX_INVENTORY_SHARES` — Stops adding paired bids once inventory reaches this cap. Default `30`.
 - `MM_ENABLE_SELL_EXCESS` — Places SELL quotes for excess one-sided inventory. Default `true`.
-- `MM_INTERVAL_MINUTES`, `MM_MARKET`, `MM_TICK_SIZE`, `MM_NEG_RISK` — Same idea as the range-arb settings.
+- `BTC5M_INTERVAL_MINUTES`, `BTC5M_MARKET`, `BTC5M_TICK_SIZE`, `BTC5M_NEG_RISK` — Shared BTC 5m defaults; `MM_*` overrides are still supported if needed.
 
 BTC 5m edge backtest:
 ```bash
 npm run backtest:btc5m -- --strategy edge --csv data/btc5m-history.csv
 ```
 
+BTC 5m edge live/dry-run:
+```bash
+npm run btc5m:edge
+```
+
+The live edge bot writes decision/order rows to `EDGE_RECORD_FILE` when `EDGE_RECORD_ENABLED=true` (default `data/btc5m-edge-live.csv`). Keep this file together with collector history so future parameter sweeps can compare real signals, posted orders, fills, and market outcomes.
+
 `--strategy` and `--csv` are required. Supported strategy names:
-- `edge` or `btc5m:edge` — Standalone BTC fair-probability mispricing strategy; requires `btc_price` and `open_price`. It is currently backtest-only, not wired to live orders.
+- `edge` or `btc5m:edge` — Standalone BTC fair-probability mispricing strategy; requires `btc_price` and `open_price`.
 - `range-arb` or `btc5m:range-arb` — Backtests the fixed-price `RANGE_ARB_PRICE_X` / `RANGE_ARB_USDC_PER_LEG` strategy.
 - `market-maker` or `btc5m:market-maker` — Backtests the current bid-quoting market-maker logic using `MM_` parameters.
+- `hybrid` or `btc5m:hybrid` — Backtests the regime-switching edge/range-arb strategy.
 
 Polymarket-only CSVs with `winning_outcome` can be used by `range-arb` and `market-maker`.
 
