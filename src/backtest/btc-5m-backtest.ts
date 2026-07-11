@@ -3,10 +3,11 @@ import { dirname, resolve } from "path";
 import { buildBtc5mEdgeOrders } from "../strategies/btc5m/edge";
 import { buildBtc5mMarketMakerQuotes } from "../strategies/btc5m/market-maker";
 import { buildBtc5mRangeArbOrders } from "../strategies/btc5m/range-arb";
+import { buildBtc5mHybridOrders, PriceSnapshot } from "../strategies/btc5m/hybrid";
 import { Btc5mStrategyQuote } from "../strategies/btc5m/types";
 
 type Leg = "UP" | "DOWN";
-type BacktestStrategy = "edge" | "range-arb" | "market-maker";
+type BacktestStrategy = "edge" | "range-arb" | "market-maker" | "hybrid";
 
 type BacktestConfig = {
     strategy: BacktestStrategy;
@@ -27,6 +28,11 @@ type BacktestConfig = {
     marketMakerInventorySkewPerShare: number;
     marketMakerMaxUsdcPerLeg: number;
     marketMakerMaxInventoryShares: number;
+    // Hybrid params
+    hybridLookbackSeconds: number;
+    hybridOscillationThreshold: number;
+    hybridRangeThreshold: number;
+    hybridTrendThreshold: number;
 };
 
 type MarketRow = {
@@ -125,6 +131,7 @@ function parseStrategy(value: string | undefined): BacktestStrategy {
     if (value === "edge" || value === "btc5m:edge") return "edge";
     if (value === "range-arb" || value === "btc5m:range-arb") return "range-arb";
     if (value === "market-maker" || value === "btc5m:market-maker") return "market-maker";
+    if (value === "hybrid" || value === "btc5m:hybrid") return "hybrid";
     throw new Error(`Unsupported or missing strategy: ${value || "(empty)"}\n\n${usage()}`);
 }
 
@@ -155,6 +162,11 @@ function loadConfig(): BacktestConfig {
         marketMakerInventorySkewPerShare: Number(getArgValue("--mm-inventory-skew-per-share") ?? envNumber("MM_INVENTORY_SKEW_PER_SHARE", 0.002)),
         marketMakerMaxUsdcPerLeg: Number(getArgValue("--mm-max-usdc-per-leg") ?? envNumber("MM_MAX_USDC_PER_LEG", 0)),
         marketMakerMaxInventoryShares: Number(getArgValue("--mm-max-inventory-shares") ?? envNumber("MM_MAX_INVENTORY_SHARES", 30)),
+        // Hybrid params
+        hybridLookbackSeconds: Number(getArgValue("--hybrid-lookback") ?? envNumber("HYBRID_LOOKBACK_SECONDS", 60)),
+        hybridOscillationThreshold: Number(getArgValue("--hybrid-osc-threshold") ?? envNumber("HYBRID_OSC_THRESHOLD", 2)),
+        hybridRangeThreshold: Number(getArgValue("--hybrid-range-threshold") ?? envNumber("HYBRID_RANGE_THRESHOLD", 0.30)),
+        hybridTrendThreshold: Number(getArgValue("--hybrid-trend-threshold") ?? envNumber("HYBRID_TREND_THRESHOLD", 0.15)),
     };
 
     if (!cfg.csvPath) throw new Error(`Missing --csv <path> or BACKTEST_CSV\n\n${usage()}`);
@@ -561,6 +573,76 @@ function main(): void {
     printSummary(cycles, trades, cfg);
 }
 
+function runHybridBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    const cycles = createCycleMap(rows, cfg);
+    // Maintain a sliding window of price snapshots per cycle for regime detection
+    const cycleHistory = new Map<string, PriceSnapshot[]>();
+
+    let regimeStats = { oscillating: 0, trending: 0, unknown: 0 };
+
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+        const secondsLeft = (cycle.endMs - row.timestampMs) / 1000;
+        if (secondsLeft < cfg.minSecondsLeft) continue;
+
+        // Build price history for this cycle
+        if (!cycleHistory.has(row.slug)) cycleHistory.set(row.slug, []);
+        const history = cycleHistory.get(row.slug)!;
+        if (row.upAsk > 0) {
+            history.push({ t: row.timestampMs, upAsk: row.upAsk });
+            // Trim to lookback window
+            const cutoff = row.timestampMs - cfg.hybridLookbackSeconds * 1000;
+            while (history.length > 0 && history[0].t < cutoff) history.shift();
+        }
+
+        const decision = buildBtc5mHybridOrders({
+            timestampMs: row.timestampMs,
+            endMs: cycle.endMs,
+            btcPrice: row.btcPrice,
+            openPrice: cycle.openPrice,
+            upAsk: row.upAsk,
+            downAsk: row.downAsk,
+            spentUp: cycle.spentUp,
+            spentDown: cycle.spentDown,
+            hasUpPosition: cycle.spentUp > 0,
+            hasDownPosition: cycle.spentDown > 0,
+            params: {
+                lookbackSeconds: cfg.hybridLookbackSeconds,
+                oscillationThreshold: cfg.hybridOscillationThreshold,
+                rangeThreshold: cfg.hybridRangeThreshold,
+                trendThreshold: cfg.hybridTrendThreshold,
+                edge: {
+                    intervalMinutes: cfg.intervalMinutes,
+                    volPerInterval: cfg.volPerInterval,
+                    minEdge: cfg.minEdge,
+                    orderUsdc: cfg.orderUsdc,
+                    maxUsdcPerLeg: cfg.maxUsdcPerLeg,
+                    maxPrice: cfg.maxPrice,
+                },
+                rangeArb: {
+                    priceX: cfg.rangePriceX,
+                    usdcPerLeg: cfg.rangeUsdcPerLeg,
+                },
+            },
+            priceHistory: history,
+        });
+
+        regimeStats[decision.regime]++;
+        const note = decision.reason ?? `hybrid:${decision.regime}`;
+        applyBuyQuotes(cycle, row, decision.quotes, note);
+    }
+
+    settleCycles(cycles);
+    const cycleList = Array.from(cycles.values()).sort((a, b) => a.startMs - b.startMs);
+    const total = regimeStats.oscillating + regimeStats.trending + regimeStats.unknown;
+    if (total > 0) {
+        console.log(`Regime distribution: oscillating=${regimeStats.oscillating} (${(regimeStats.oscillating / total * 100).toFixed(1)}%), trending=${regimeStats.trending} (${(regimeStats.trending / total * 100).toFixed(1)}%), unknown=${regimeStats.unknown} (${(regimeStats.unknown / total * 100).toFixed(1)}%)`);
+    }
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
 function runStrategy(cfg: BacktestConfig, records: Record<string, string>[]): { cycles: CycleState[]; trades: Trade[] } {
     const rows = toMarketRows(records, cfg.intervalMinutes);
     switch (cfg.strategy) {
@@ -571,6 +653,8 @@ function runStrategy(cfg: BacktestConfig, records: Record<string, string>[]): { 
             return runRangeArbBacktest(rows, cfg);
         case "market-maker":
             return runMarketMakerBacktest(rows, cfg);
+        case "hybrid":
+            return runHybridBacktest(rows, cfg);
         default:
             throw new Error(`Unsupported strategy: ${cfg.strategy}`);
     }
