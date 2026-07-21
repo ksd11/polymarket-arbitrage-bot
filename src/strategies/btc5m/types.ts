@@ -17,6 +17,7 @@ export type Btc5mStrategyQuote = {
     tokenId?: string;
     fair?: number;
     edge?: number;
+    note?: string;
 };
 
 export type Btc5mStrategyDecision = {

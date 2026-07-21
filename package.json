@@ -8,6 +8,8 @@
     "btc5m:range-arb": "tsx src/btc-5m-range-arb.ts",
     "btc5m:market-maker": "tsx src/btc-5m-market-maker.ts",
     "btc5m:edge": "tsx src/btc-5m-edge.ts",
+    "btc5m:managed-edge": "tsx src/btc-5m-managed-edge.ts",
+    "btc5m:trend-pullback": "tsx src/btc-5m-trend-pullback.ts",
     "btc5m:hybrid": "tsx src/btc-5m-hybrid.ts",
     "backtest:btc5m": "tsx src/backtest/btc-5m-backtest.ts",
     "collect:btc5m-history": "tsx src/collect/btc-5m-history.ts",

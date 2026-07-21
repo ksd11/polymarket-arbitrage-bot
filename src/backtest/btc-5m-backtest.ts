@@ -4,10 +4,14 @@ import { buildBtc5mEdgeOrders } from "../strategies/btc5m/edge";
 import { buildBtc5mMarketMakerQuotes } from "../strategies/btc5m/market-maker";
 import { buildBtc5mRangeArbOrders } from "../strategies/btc5m/range-arb";
 import { buildBtc5mHybridOrders, PriceSnapshot } from "../strategies/btc5m/hybrid";
+import { buildBtc5mManagedEdgeOrders } from "../strategies/btc5m/managed-edge";
+import { buildBtc5mAdaptiveEdgeOrders } from "../strategies/btc5m/adaptive-edge";
+import { buildBtc5mTrendPullbackOrders, Btc5mTrendPullbackState } from "../strategies/btc5m/trend-pullback";
+import { Btc5mRegimeSnapshot } from "../strategies/btc5m/regime";
 import { Btc5mStrategyQuote } from "../strategies/btc5m/types";
 
 type Leg = "UP" | "DOWN";
-type BacktestStrategy = "edge" | "range-arb" | "market-maker" | "hybrid";
+type BacktestStrategy = "edge" | "range-arb" | "market-maker" | "hybrid" | "managed-edge" | "adaptive-edge" | "trend-pullback";
 
 type BacktestConfig = {
     strategy: BacktestStrategy;
@@ -35,6 +39,47 @@ type BacktestConfig = {
     hybridOscillationThreshold: number;
     hybridRangeThreshold: number;
     hybridTrendThreshold: number;
+    managedMinSecondsLeftToOpen: number;
+    managedMaxSecondsLeftToOpen: number;
+    managedNoCheapBuySecondsLeft: number;
+    managedMinCheapPrice: number;
+    managedMinEntryPrice: number;
+    managedTakeProfitPct: number;
+    managedTakeProfitSellRatio: number;
+    managedStopLossPct: number;
+    managedForceExitSecondsLeft: number;
+    managedMinExitPrice: number;
+    adaptiveLookbackSeconds: number;
+    adaptiveMinHistoryPoints: number;
+    adaptiveOscillationCrossCount: number;
+    adaptiveOscillationChoppiness: number;
+    adaptiveOscillationMaxBtcMoveBps: number;
+    adaptiveTrendMinBtcMoveBps: number;
+    adaptiveTrendMaxChoppiness: number;
+    adaptivePanicMaxBtcMoveBps: number;
+    adaptivePanicMinDiscount: number;
+    adaptivePanicMinAsk: number;
+    adaptivePanicMaxAsk: number;
+    adaptiveUndervalueScoreThreshold: number;
+    adaptiveMaxRequiredSigma: number;
+    adaptiveMomentumMinBps: number;
+    adaptiveFairMarketWeight: number;
+    adaptiveFairAskWeight: number;
+    adaptivePercentileWeight: number;
+    adaptiveMomentumDivergenceBonus: number;
+    adaptivePanicDiscountBonus: number;
+    adaptiveRequiredSigmaPenalty: number;
+    adaptiveLateTimePenalty: number;
+    adaptiveScalpProfitPrice: number;
+    adaptiveScalpProfitPct: number;
+    trendPullbackTriggerPrice: number;
+    trendPullbackEntryPrice: number;
+    trendPullbackOrderUsdc: number;
+    trendPullbackMaxUsdcPerLeg: number;
+    trendPullbackMinSecondsLeftToTrigger: number;
+    trendPullbackTriggerConfirmSeconds: number;
+    trendPullbackMaxOrderAgeSeconds: number;
+    trendPullbackMaxBtcReversalBps: number;
 };
 
 type MarketRow = {
@@ -66,6 +111,10 @@ type CycleState = {
     spentDown: number;
     inventoryUp: number;
     inventoryDown: number;
+    costUp: number;
+    costDown: number;
+    tookProfitUp?: boolean;
+    tookProfitDown?: boolean;
     trades: Trade[];
 };
 
@@ -112,13 +161,15 @@ function envNumber(name: string, fallback: number): number {
 function usage(): string {
     return [
         "Usage:",
-        "  npm run backtest:btc5m -- --strategy <edge|range-arb|market-maker> --csv <path>",
+        "  npm run backtest:btc5m -- --strategy <edge|managed-edge|adaptive-edge|trend-pullback|range-arb|market-maker|hybrid> --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:edge --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:range-arb --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:market-maker --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:managed-edge --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:trend-pullback --csv <path>",
         "",
         "Required:",
-        "  --strategy <name>   Strategy name. Also supports btc5m:edge, btc5m:range-arb, btc5m:market-maker",
+        "  --strategy <name>   Strategy name. Also supports btc5m:* aliases",
         "  --csv <path>        Historical CSV file, e.g. data/btc5m-history.csv",
         "",
         "Optional:",
@@ -128,6 +179,9 @@ function usage(): string {
         "  --edge-min-elapsed <seconds>  Default: BACKTEST_EDGE_MIN_ELAPSED_SECONDS or 0",
         "  --order-usdc <number>        Default: BACKTEST_ORDER_USDC or 5",
         "  --max-usdc-per-leg <number>  Default: BACKTEST_MAX_USDC_PER_LEG or 10",
+        "  --trend-trigger-price <price> Trend-pullback trigger; default 0.85",
+        "  --trend-entry-price <price>   Trend-pullback BUY limit; default 0.80",
+        "  --trend-order-usdc <number>   Trend-pullback cost per filled cycle; default 5",
     ].join("\n");
 }
 
@@ -136,6 +190,9 @@ function parseStrategy(value: string | undefined): BacktestStrategy {
     if (value === "range-arb" || value === "btc5m:range-arb") return "range-arb";
     if (value === "market-maker" || value === "btc5m:market-maker") return "market-maker";
     if (value === "hybrid" || value === "btc5m:hybrid") return "hybrid";
+    if (value === "managed-edge" || value === "btc5m:managed-edge") return "managed-edge";
+    if (value === "adaptive-edge" || value === "btc5m:adaptive-edge") return "adaptive-edge";
+    if (value === "trend-pullback" || value === "btc5m:trend-pullback") return "trend-pullback";
     throw new Error(`Unsupported or missing strategy: ${value || "(empty)"}\n\n${usage()}`);
 }
 
@@ -173,6 +230,47 @@ function loadConfig(): BacktestConfig {
         hybridOscillationThreshold: Number(getArgValue("--hybrid-osc-threshold") ?? envNumber("HYBRID_OSC_THRESHOLD", 2)),
         hybridRangeThreshold: Number(getArgValue("--hybrid-range-threshold") ?? envNumber("HYBRID_RANGE_THRESHOLD", 0.30)),
         hybridTrendThreshold: Number(getArgValue("--hybrid-trend-threshold") ?? envNumber("HYBRID_TREND_THRESHOLD", 0.15)),
+        managedMinSecondsLeftToOpen: Number(getArgValue("--managed-min-seconds-left-to-open") ?? envNumber("MANAGED_EDGE_MIN_SECONDS_LEFT_TO_OPEN", 60)),
+        managedMaxSecondsLeftToOpen: Number(getArgValue("--managed-max-seconds-left-to-open") ?? envNumber("MANAGED_EDGE_MAX_SECONDS_LEFT_TO_OPEN", 240)),
+        managedNoCheapBuySecondsLeft: Number(getArgValue("--managed-no-cheap-buy-seconds-left") ?? envNumber("MANAGED_EDGE_NO_CHEAP_BUY_SECONDS_LEFT", 90)),
+        managedMinCheapPrice: Number(getArgValue("--managed-min-cheap-price") ?? envNumber("MANAGED_EDGE_MIN_CHEAP_PRICE", 0.20)),
+        managedMinEntryPrice: Number(getArgValue("--managed-min-entry-price") ?? envNumber("MANAGED_EDGE_MIN_ENTRY_PRICE", 0.12)),
+        managedTakeProfitPct: Number(getArgValue("--managed-take-profit-pct") ?? envNumber("MANAGED_EDGE_TAKE_PROFIT_PCT", 0.20)),
+        managedTakeProfitSellRatio: Number(getArgValue("--managed-take-profit-sell-ratio") ?? envNumber("MANAGED_EDGE_TAKE_PROFIT_SELL_RATIO", 0.50)),
+        managedStopLossPct: Number(getArgValue("--managed-stop-loss-pct") ?? envNumber("MANAGED_EDGE_STOP_LOSS_PCT", 0.30)),
+        managedForceExitSecondsLeft: Number(getArgValue("--managed-force-exit-seconds-left") ?? envNumber("MANAGED_EDGE_FORCE_EXIT_SECONDS_LEFT", 30)),
+        managedMinExitPrice: Number(getArgValue("--managed-min-exit-price") ?? envNumber("MANAGED_EDGE_MIN_EXIT_PRICE", 0.05)),
+        adaptiveLookbackSeconds: Number(getArgValue("--adaptive-lookback") ?? envNumber("ADAPTIVE_EDGE_LOOKBACK_SECONDS", 60)),
+        adaptiveMinHistoryPoints: Number(getArgValue("--adaptive-min-history-points") ?? envNumber("ADAPTIVE_EDGE_MIN_HISTORY_POINTS", 8)),
+        adaptiveOscillationCrossCount: Number(getArgValue("--adaptive-osc-cross-count") ?? envNumber("ADAPTIVE_EDGE_OSC_CROSS_COUNT", 2)),
+        adaptiveOscillationChoppiness: Number(getArgValue("--adaptive-osc-choppiness") ?? envNumber("ADAPTIVE_EDGE_OSC_CHOPPINESS", 3)),
+        adaptiveOscillationMaxBtcMoveBps: Number(getArgValue("--adaptive-osc-max-btc-move-bps") ?? envNumber("ADAPTIVE_EDGE_OSC_MAX_BTC_MOVE_BPS", 8)),
+        adaptiveTrendMinBtcMoveBps: Number(getArgValue("--adaptive-trend-min-btc-move-bps") ?? envNumber("ADAPTIVE_EDGE_TREND_MIN_BTC_MOVE_BPS", 5)),
+        adaptiveTrendMaxChoppiness: Number(getArgValue("--adaptive-trend-max-choppiness") ?? envNumber("ADAPTIVE_EDGE_TREND_MAX_CHOPPINESS", 8)),
+        adaptivePanicMaxBtcMoveBps: Number(getArgValue("--adaptive-panic-max-btc-move-bps") ?? envNumber("ADAPTIVE_EDGE_PANIC_MAX_BTC_MOVE_BPS", 5)),
+        adaptivePanicMinDiscount: Number(getArgValue("--adaptive-panic-min-discount") ?? envNumber("ADAPTIVE_EDGE_PANIC_MIN_DISCOUNT", 0.10)),
+        adaptivePanicMinAsk: Number(getArgValue("--adaptive-panic-min-ask") ?? envNumber("ADAPTIVE_EDGE_PANIC_MIN_ASK", 0.15)),
+        adaptivePanicMaxAsk: Number(getArgValue("--adaptive-panic-max-ask") ?? envNumber("ADAPTIVE_EDGE_PANIC_MAX_ASK", 0.45)),
+        adaptiveUndervalueScoreThreshold: Number(getArgValue("--adaptive-undervalue-score") ?? envNumber("ADAPTIVE_EDGE_UNDERVALUE_SCORE_THRESHOLD", 0.20)),
+        adaptiveMaxRequiredSigma: Number(getArgValue("--adaptive-max-required-sigma") ?? envNumber("ADAPTIVE_EDGE_MAX_REQUIRED_SIGMA", 1.20)),
+        adaptiveMomentumMinBps: Number(getArgValue("--adaptive-momentum-min-bps") ?? envNumber("ADAPTIVE_EDGE_MOMENTUM_MIN_BPS", 2)),
+        adaptiveFairMarketWeight: Number(getArgValue("--adaptive-fair-market-weight") ?? envNumber("ADAPTIVE_EDGE_FAIR_MARKET_WEIGHT", 0.35)),
+        adaptiveFairAskWeight: Number(getArgValue("--adaptive-fair-ask-weight") ?? envNumber("ADAPTIVE_EDGE_FAIR_ASK_WEIGHT", 0.20)),
+        adaptivePercentileWeight: Number(getArgValue("--adaptive-percentile-weight") ?? envNumber("ADAPTIVE_EDGE_PERCENTILE_WEIGHT", 0.04)),
+        adaptiveMomentumDivergenceBonus: Number(getArgValue("--adaptive-momentum-divergence-bonus") ?? envNumber("ADAPTIVE_EDGE_MOMENTUM_DIVERGENCE_BONUS", 0.04)),
+        adaptivePanicDiscountBonus: Number(getArgValue("--adaptive-panic-discount-bonus") ?? envNumber("ADAPTIVE_EDGE_PANIC_DISCOUNT_BONUS", 0.03)),
+        adaptiveRequiredSigmaPenalty: Number(getArgValue("--adaptive-required-sigma-penalty") ?? envNumber("ADAPTIVE_EDGE_REQUIRED_SIGMA_PENALTY", 0.10)),
+        adaptiveLateTimePenalty: Number(getArgValue("--adaptive-late-time-penalty") ?? envNumber("ADAPTIVE_EDGE_LATE_TIME_PENALTY", 0.05)),
+        adaptiveScalpProfitPrice: Number(getArgValue("--adaptive-scalp-profit-price") ?? envNumber("ADAPTIVE_EDGE_SCALP_PROFIT_PRICE", 0.10)),
+        adaptiveScalpProfitPct: Number(getArgValue("--adaptive-scalp-profit-pct") ?? envNumber("ADAPTIVE_EDGE_SCALP_PROFIT_PCT", 0.25)),
+        trendPullbackTriggerPrice: Number(getArgValue("--trend-trigger-price") ?? envNumber("TREND_PULLBACK_TRIGGER_PRICE", 0.85)),
+        trendPullbackEntryPrice: Number(getArgValue("--trend-entry-price") ?? envNumber("TREND_PULLBACK_ENTRY_PRICE", 0.80)),
+        trendPullbackOrderUsdc: Number(getArgValue("--trend-order-usdc") ?? envNumber("TREND_PULLBACK_ORDER_USDC", 5)),
+        trendPullbackMaxUsdcPerLeg: Number(getArgValue("--trend-max-usdc-per-leg") ?? envNumber("TREND_PULLBACK_MAX_USDC_PER_LEG", 5)),
+        trendPullbackMinSecondsLeftToTrigger: Number(getArgValue("--trend-min-seconds-left-to-trigger") ?? envNumber("TREND_PULLBACK_MIN_SECONDS_LEFT_TO_TRIGGER", 30)),
+        trendPullbackTriggerConfirmSeconds: Number(getArgValue("--trend-trigger-confirm-seconds") ?? envNumber("TREND_PULLBACK_TRIGGER_CONFIRM_SECONDS", 0)),
+        trendPullbackMaxOrderAgeSeconds: Number(getArgValue("--trend-max-order-age-seconds") ?? envNumber("TREND_PULLBACK_MAX_ORDER_AGE_SECONDS", 0)),
+        trendPullbackMaxBtcReversalBps: Number(getArgValue("--trend-max-btc-reversal-bps") ?? envNumber("TREND_PULLBACK_MAX_BTC_REVERSAL_BPS", 8)),
     };
 
     if (!cfg.csvPath) throw new Error(`Missing --csv <path> or BACKTEST_CSV\n\n${usage()}`);
@@ -193,6 +291,29 @@ function loadConfig(): BacktestConfig {
     if (cfg.marketMakerInventorySkewPerShare < 0) throw new Error("MM_INVENTORY_SKEW_PER_SHARE must be >= 0");
     if (cfg.marketMakerMaxUsdcPerLeg < 0) throw new Error("MM_MAX_USDC_PER_LEG must be >= 0");
     if (cfg.marketMakerMaxInventoryShares < cfg.marketMakerQuoteShares) throw new Error("MM_MAX_INVENTORY_SHARES must be >= MM_QUOTE_SHARES");
+    if (cfg.managedMinSecondsLeftToOpen < 0) throw new Error("MANAGED_EDGE_MIN_SECONDS_LEFT_TO_OPEN must be >= 0");
+    if (cfg.managedMaxSecondsLeftToOpen < cfg.managedMinSecondsLeftToOpen) throw new Error("MANAGED_EDGE_MAX_SECONDS_LEFT_TO_OPEN must be >= MANAGED_EDGE_MIN_SECONDS_LEFT_TO_OPEN");
+    if (cfg.managedNoCheapBuySecondsLeft < 0) throw new Error("MANAGED_EDGE_NO_CHEAP_BUY_SECONDS_LEFT must be >= 0");
+    if (!(cfg.managedMinCheapPrice >= 0 && cfg.managedMinCheapPrice <= 1)) throw new Error("MANAGED_EDGE_MIN_CHEAP_PRICE must be between 0 and 1");
+    if (!(cfg.managedMinEntryPrice >= 0 && cfg.managedMinEntryPrice <= 1)) throw new Error("MANAGED_EDGE_MIN_ENTRY_PRICE must be between 0 and 1");
+    if (cfg.managedTakeProfitPct < 0) throw new Error("MANAGED_EDGE_TAKE_PROFIT_PCT must be >= 0");
+    if (!(cfg.managedTakeProfitSellRatio > 0 && cfg.managedTakeProfitSellRatio <= 1)) throw new Error("MANAGED_EDGE_TAKE_PROFIT_SELL_RATIO must be > 0 and <= 1");
+    if (cfg.managedStopLossPct < 0) throw new Error("MANAGED_EDGE_STOP_LOSS_PCT must be >= 0");
+    if (cfg.managedForceExitSecondsLeft < 0) throw new Error("MANAGED_EDGE_FORCE_EXIT_SECONDS_LEFT must be >= 0");
+    if (!(cfg.managedMinExitPrice >= 0 && cfg.managedMinExitPrice <= 1)) throw new Error("MANAGED_EDGE_MIN_EXIT_PRICE must be between 0 and 1");
+    if (cfg.adaptiveUndervalueScoreThreshold < 0) throw new Error("ADAPTIVE_EDGE_UNDERVALUE_SCORE_THRESHOLD must be >= 0");
+    if (cfg.adaptiveMaxRequiredSigma < 0) throw new Error("ADAPTIVE_EDGE_MAX_REQUIRED_SIGMA must be >= 0");
+    if (cfg.adaptiveMomentumMinBps < 0) throw new Error("ADAPTIVE_EDGE_MOMENTUM_MIN_BPS must be >= 0");
+    if (cfg.adaptiveRequiredSigmaPenalty < 0) throw new Error("ADAPTIVE_EDGE_REQUIRED_SIGMA_PENALTY must be >= 0");
+    if (cfg.adaptiveLateTimePenalty < 0) throw new Error("ADAPTIVE_EDGE_LATE_TIME_PENALTY must be >= 0");
+    if (!(cfg.trendPullbackTriggerPrice > 0 && cfg.trendPullbackTriggerPrice < 1)) throw new Error("TREND_PULLBACK_TRIGGER_PRICE must be between 0 and 1");
+    if (!(cfg.trendPullbackEntryPrice > 0 && cfg.trendPullbackEntryPrice < cfg.trendPullbackTriggerPrice)) throw new Error("TREND_PULLBACK_ENTRY_PRICE must be > 0 and below TREND_PULLBACK_TRIGGER_PRICE");
+    if (cfg.trendPullbackOrderUsdc <= 0) throw new Error("TREND_PULLBACK_ORDER_USDC must be > 0");
+    if (cfg.trendPullbackMaxUsdcPerLeg < 0) throw new Error("TREND_PULLBACK_MAX_USDC_PER_LEG must be >= 0");
+    if (cfg.trendPullbackMinSecondsLeftToTrigger < 0) throw new Error("TREND_PULLBACK_MIN_SECONDS_LEFT_TO_TRIGGER must be >= 0");
+    if (cfg.trendPullbackTriggerConfirmSeconds < 0) throw new Error("TREND_PULLBACK_TRIGGER_CONFIRM_SECONDS must be >= 0");
+    if (cfg.trendPullbackMaxOrderAgeSeconds < 0) throw new Error("TREND_PULLBACK_MAX_ORDER_AGE_SECONDS must be >= 0");
+    if (cfg.trendPullbackMaxBtcReversalBps < 0) throw new Error("TREND_PULLBACK_MAX_BTC_REVERSAL_BPS must be >= 0");
     return cfg;
 }
 
@@ -334,6 +455,8 @@ function runBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleSta
             spentDown: 0,
             inventoryUp: 0,
             inventoryDown: 0,
+            costUp: 0,
+            costDown: 0,
             trades: [],
         };
         if (!cycles.has(row.slug)) cycles.set(row.slug, cycle);
@@ -407,6 +530,178 @@ function settleCycles(cycles: Map<string, CycleState>): void {
     }
 }
 
+function settleManagedCycles(cycles: Map<string, CycleState>): void {
+    for (const cycle of cycles.values()) {
+        const winner = inferWinner(cycle);
+        if (winner === "UP" && cycle.inventoryUp > 0) {
+            cycle.trades.push({
+                slug: cycle.slug,
+                timestampMs: cycle.endMs,
+                leg: "UP",
+                price: 1,
+                shares: cycle.inventoryUp,
+                cost: 0,
+                finalPrice: cycle.finalPrice,
+                payout: cycle.inventoryUp,
+                pnl: cycle.inventoryUp,
+                note: "managed-edge settlement",
+            });
+        }
+        if (winner === "DOWN" && cycle.inventoryDown > 0) {
+            cycle.trades.push({
+                slug: cycle.slug,
+                timestampMs: cycle.endMs,
+                leg: "DOWN",
+                price: 1,
+                shares: cycle.inventoryDown,
+                cost: 0,
+                finalPrice: cycle.finalPrice,
+                payout: cycle.inventoryDown,
+                pnl: cycle.inventoryDown,
+                note: "managed-edge settlement",
+            });
+        }
+        for (const trade of cycle.trades) {
+            trade.finalPrice = trade.finalPrice ?? cycle.finalPrice;
+        }
+    }
+}
+
+function runManagedEdgeBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    const cycles = createCycleMap(rows, cfg);
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+        if (row.btcPrice === undefined || cycle.openPrice === undefined) continue;
+
+        const decision = buildBtc5mManagedEdgeOrders({
+            timestampMs: row.timestampMs,
+            endMs: cycle.endMs,
+            btcPrice: row.btcPrice,
+            openPrice: cycle.openPrice,
+            up: { bestBid: row.upBid, bestAsk: row.upAsk, mid: row.upMid },
+            down: { bestBid: row.downBid, bestAsk: row.downAsk, mid: row.downMid },
+            positions: {
+                UP: { shares: cycle.inventoryUp, cost: cycle.costUp, tookProfit: cycle.tookProfitUp },
+                DOWN: { shares: cycle.inventoryDown, cost: cycle.costDown, tookProfit: cycle.tookProfitDown },
+            },
+            params: {
+                intervalMinutes: cfg.intervalMinutes,
+                volPerInterval: cfg.volPerInterval,
+                minEdge: cfg.minEdge,
+                minMoveBps: cfg.edgeMinMoveBps,
+                minElapsedSeconds: cfg.edgeMinElapsedSeconds,
+                orderUsdc: cfg.orderUsdc,
+                maxUsdcPerLeg: cfg.maxUsdcPerLeg,
+                maxPrice: cfg.maxPrice,
+                minSecondsLeftToOpen: cfg.managedMinSecondsLeftToOpen,
+                maxSecondsLeftToOpen: cfg.managedMaxSecondsLeftToOpen,
+                noCheapBuySecondsLeft: cfg.managedNoCheapBuySecondsLeft,
+                minCheapPrice: cfg.managedMinCheapPrice,
+                minEntryPrice: cfg.managedMinEntryPrice,
+                takeProfitPct: cfg.managedTakeProfitPct,
+                takeProfitSellRatio: cfg.managedTakeProfitSellRatio,
+                stopLossPct: cfg.managedStopLossPct,
+                forceExitSecondsLeft: cfg.managedForceExitSecondsLeft,
+                minExitPrice: cfg.managedMinExitPrice,
+            },
+        });
+        applyManagedQuotes(cycle, row, decision.quotes);
+    }
+    settleManagedCycles(cycles);
+    const cycleList = Array.from(cycles.values()).sort((a, b) => a.startMs - b.startMs);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
+function runAdaptiveEdgeBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    const cycles = createCycleMap(rows, cfg);
+    const historyByCycle = new Map<string, Btc5mRegimeSnapshot[]>();
+    const regimeStats = { oscillating: 0, trending: 0, "panic-discount": 0, unknown: 0 };
+
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+        if (row.btcPrice === undefined || cycle.openPrice === undefined) continue;
+
+        if (!historyByCycle.has(row.slug)) historyByCycle.set(row.slug, []);
+        const history = historyByCycle.get(row.slug)!;
+        if (row.upAsk > 0) {
+            history.push({ t: row.timestampMs, upAsk: row.upAsk, downAsk: row.downAsk, btcPrice: row.btcPrice });
+            const cutoff = row.timestampMs - cfg.adaptiveLookbackSeconds * 1000;
+            while (history.length > 0 && history[0].t < cutoff) history.shift();
+        }
+
+        const decision = buildBtc5mAdaptiveEdgeOrders({
+            timestampMs: row.timestampMs,
+            endMs: cycle.endMs,
+            btcPrice: row.btcPrice,
+            openPrice: cycle.openPrice,
+            up: { bestBid: row.upBid, bestAsk: row.upAsk, mid: row.upMid },
+            down: { bestBid: row.downBid, bestAsk: row.downAsk, mid: row.downMid },
+            positions: {
+                UP: { shares: cycle.inventoryUp, cost: cycle.costUp, tookProfit: cycle.tookProfitUp },
+                DOWN: { shares: cycle.inventoryDown, cost: cycle.costDown, tookProfit: cycle.tookProfitDown },
+            },
+            history,
+            params: {
+                intervalMinutes: cfg.intervalMinutes,
+                volPerInterval: cfg.volPerInterval,
+                minEdge: cfg.minEdge,
+                minMoveBps: cfg.edgeMinMoveBps,
+                minElapsedSeconds: cfg.edgeMinElapsedSeconds,
+                orderUsdc: cfg.orderUsdc,
+                maxUsdcPerLeg: cfg.maxUsdcPerLeg,
+                maxPrice: cfg.maxPrice,
+                lookbackSeconds: cfg.adaptiveLookbackSeconds,
+                minHistoryPoints: cfg.adaptiveMinHistoryPoints,
+                oscillationCrossCount: cfg.adaptiveOscillationCrossCount,
+                oscillationChoppiness: cfg.adaptiveOscillationChoppiness,
+                oscillationMaxBtcMoveBps: cfg.adaptiveOscillationMaxBtcMoveBps,
+                trendMinBtcMoveBps: cfg.adaptiveTrendMinBtcMoveBps,
+                trendMaxChoppiness: cfg.adaptiveTrendMaxChoppiness,
+                panicMaxBtcMoveBps: cfg.adaptivePanicMaxBtcMoveBps,
+                panicMinDiscount: cfg.adaptivePanicMinDiscount,
+                panicMinAsk: cfg.adaptivePanicMinAsk,
+                panicMaxAsk: cfg.adaptivePanicMaxAsk,
+                undervalueScoreThreshold: cfg.adaptiveUndervalueScoreThreshold,
+                maxRequiredSigma: cfg.adaptiveMaxRequiredSigma,
+                momentumMinBps: cfg.adaptiveMomentumMinBps,
+                fairMarketWeight: cfg.adaptiveFairMarketWeight,
+                fairAskWeight: cfg.adaptiveFairAskWeight,
+                percentileWeight: cfg.adaptivePercentileWeight,
+                momentumDivergenceBonus: cfg.adaptiveMomentumDivergenceBonus,
+                panicDiscountBonus: cfg.adaptivePanicDiscountBonus,
+                requiredSigmaPenalty: cfg.adaptiveRequiredSigmaPenalty,
+                lateTimePenalty: cfg.adaptiveLateTimePenalty,
+                scalpProfitPrice: cfg.adaptiveScalpProfitPrice,
+                scalpProfitPct: cfg.adaptiveScalpProfitPct,
+                takeProfitPct: cfg.managedTakeProfitPct,
+                takeProfitSellRatio: cfg.managedTakeProfitSellRatio,
+                stopLossPct: cfg.managedStopLossPct,
+                forceExitSecondsLeft: cfg.managedForceExitSecondsLeft,
+                minExitPrice: cfg.managedMinExitPrice,
+                minSecondsLeftToOpen: cfg.managedMinSecondsLeftToOpen,
+                maxSecondsLeftToOpen: cfg.managedMaxSecondsLeftToOpen,
+                minEntryPrice: cfg.managedMinEntryPrice,
+                noCheapBuySecondsLeft: cfg.managedNoCheapBuySecondsLeft,
+                minCheapPrice: cfg.managedMinCheapPrice,
+            },
+        });
+        if (decision.metrics) regimeStats[decision.metrics.regime]++;
+        applyManagedQuotes(cycle, row, decision.quotes);
+    }
+
+    settleManagedCycles(cycles);
+    const total = Object.values(regimeStats).reduce((sum, value) => sum + value, 0);
+    if (total > 0) {
+        console.log(`Regime distribution: oscillating=${regimeStats.oscillating}, trending=${regimeStats.trending}, panic-discount=${regimeStats["panic-discount"]}, unknown=${regimeStats.unknown}`);
+    }
+    const cycleList = Array.from(cycles.values()).sort((a, b) => a.startMs - b.startMs);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
 function runRangeArbBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
     const cycles = createCycleMap(rows, cfg);
     for (const row of rows) {
@@ -471,6 +766,59 @@ function runMarketMakerBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycle
     return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
 }
 
+function runTrendPullbackBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    const cycles = createCycleMap(rows, cfg);
+    const states = new Map<string, Btc5mTrendPullbackState>();
+    let triggeredCycles = 0;
+    let filledCycles = 0;
+    let cancelledCycles = 0;
+
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+
+        const previousState = states.get(row.slug) ?? {};
+        const decision = buildBtc5mTrendPullbackOrders({
+            timestampMs: row.timestampMs,
+            endMs: cycle.endMs,
+            upAsk: row.upAsk,
+            downAsk: row.downAsk,
+            btcPrice: row.btcPrice,
+            spentUp: cycle.spentUp,
+            spentDown: cycle.spentDown,
+            state: previousState,
+            params: {
+                triggerPrice: cfg.trendPullbackTriggerPrice,
+                entryPrice: cfg.trendPullbackEntryPrice,
+                orderUsdc: cfg.trendPullbackOrderUsdc,
+                maxUsdcPerLeg: cfg.trendPullbackMaxUsdcPerLeg,
+                minSecondsLeftToTrigger: cfg.trendPullbackMinSecondsLeftToTrigger,
+                triggerConfirmSeconds: cfg.trendPullbackTriggerConfirmSeconds,
+                maxOrderAgeSeconds: cfg.trendPullbackMaxOrderAgeSeconds,
+                maxBtcReversalBps: cfg.trendPullbackMaxBtcReversalBps,
+            },
+        });
+        if (!previousState.triggeredLeg && decision.state.triggeredLeg) triggeredCycles++;
+        if (!previousState.cancelled && decision.state.cancelled) cancelledCycles++;
+
+        const quote = decision.quotes[0];
+        const ask = quote?.leg === "UP" ? row.upAsk : row.downAsk;
+        const isLaterSnapshot = decision.state.triggeredAtMs !== undefined && row.timestampMs > decision.state.triggeredAtMs;
+        if (quote && quote.side === "BUY" && isLaterSnapshot && ask > 0 && ask <= quote.price) {
+            buyAtPrice(cycle, row, quote.leg, quote.price, quote.price * quote.size, quote.fair, quote.edge, quote.note);
+            decision.state = { ...decision.state, filled: true };
+            filledCycles++;
+        }
+        states.set(row.slug, decision.state);
+    }
+
+    settleCycles(cycles);
+    console.log(`Trend-pullback orders: triggered=${triggeredCycles}, filled=${filledCycles}, cancelled=${cancelledCycles}, fill rate=${triggeredCycles ? (filledCycles / triggeredCycles * 100).toFixed(2) : "0.00"}%`);
+    const cycleList = Array.from(cycles.values()).sort((a, b) => a.startMs - b.startMs);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
 function createCycleMap(rows: MarketRow[], cfg: BacktestConfig): Map<string, CycleState> {
     const intervalMs = cfg.intervalMinutes * 60_000;
     const cycles = new Map<string, CycleState>();
@@ -486,6 +834,8 @@ function createCycleMap(rows: MarketRow[], cfg: BacktestConfig): Map<string, Cyc
             spentDown: 0,
             inventoryUp: 0,
             inventoryDown: 0,
+            costUp: 0,
+            costDown: 0,
             trades: [],
         };
         if (row.btcPrice !== undefined) cycle.finalPrice = row.btcPrice;
@@ -513,9 +863,44 @@ function buyAtPrice(cycle: CycleState, row: MarketRow, leg: Leg, price: number, 
     if (leg === "UP") {
         cycle.spentUp += cost;
         cycle.inventoryUp += shares;
+        cycle.costUp += cost;
     } else {
         cycle.spentDown += cost;
         cycle.inventoryDown += shares;
+        cycle.costDown += cost;
+    }
+}
+
+function sellAtPrice(cycle: CycleState, row: MarketRow, leg: Leg, price: number, shares: number, fair?: number, edge?: number, note?: string): void {
+    const available = leg === "UP" ? cycle.inventoryUp : cycle.inventoryDown;
+    const size = Math.min(shares, available);
+    if (size <= 0) return;
+    const proceeds = price * size;
+    cycle.trades.push({
+        slug: cycle.slug,
+        timestampMs: row.timestampMs,
+        leg,
+        price,
+        shares: size,
+        cost: 0,
+        fair,
+        edge,
+        openPrice: cycle.openPrice,
+        btcPrice: row.btcPrice,
+        payout: proceeds,
+        pnl: proceeds,
+        note,
+    });
+    if (leg === "UP") {
+        const avgCost = cycle.inventoryUp > 0 ? cycle.costUp / cycle.inventoryUp : 0;
+        cycle.inventoryUp -= size;
+        cycle.costUp = Math.max(0, cycle.costUp - avgCost * size);
+        if (note?.includes("take-profit")) cycle.tookProfitUp = true;
+    } else {
+        const avgCost = cycle.inventoryDown > 0 ? cycle.costDown / cycle.inventoryDown : 0;
+        cycle.inventoryDown -= size;
+        cycle.costDown = Math.max(0, cycle.costDown - avgCost * size);
+        if (note?.includes("take-profit")) cycle.tookProfitDown = true;
     }
 }
 
@@ -523,6 +908,17 @@ function applyBuyQuotes(cycle: CycleState, row: MarketRow, quotes: Btc5mStrategy
     for (const quote of quotes) {
         if (quote.side !== "BUY") continue;
         buyAtPrice(cycle, row, quote.leg, quote.price, quote.price * quote.size, quote.fair, quote.edge, note);
+    }
+}
+
+function applyManagedQuotes(cycle: CycleState, row: MarketRow, quotes: Btc5mStrategyQuote[]): void {
+    for (const quote of quotes) {
+        if (quote.side === "BUY") {
+            buyAtPrice(cycle, row, quote.leg, quote.price, quote.price * quote.size, quote.fair, quote.edge, quote.note ?? "managed-edge buy");
+        } else {
+            const note = quote.note ?? (quote.size < (quote.leg === "UP" ? cycle.inventoryUp : cycle.inventoryDown) ? "managed-edge take-profit sell" : "managed-edge exit sell");
+            sellAtPrice(cycle, row, quote.leg, quote.price, quote.size, quote.fair, quote.edge, note);
+        }
     }
 }
 
@@ -565,7 +961,11 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
     console.log(`Cycles: ${cycles.length}, traded cycles: ${tradedCycles}`);
     console.log(`Trades: ${trades.length}, winners: ${winners}, win rate: ${trades.length ? (winners / trades.length * 100).toFixed(2) : "0.00"}%`);
     console.log(`Cost: ${totalCost.toFixed(4)}, payout: ${totalPayout.toFixed(4)}, PnL: ${totalPnl.toFixed(4)}, ROI: ${(roi * 100).toFixed(2)}%`);
-    console.log(`Params: minEdge=${cfg.minEdge}, orderUsdc=${cfg.orderUsdc}, maxUsdcPerLeg=${cfg.maxUsdcPerLeg}, volPerInterval=${cfg.volPerInterval}`);
+    if (cfg.strategy === "trend-pullback") {
+        console.log(`Params: trigger=${cfg.trendPullbackTriggerPrice}, entry=${cfg.trendPullbackEntryPrice}, orderUsdc=${cfg.trendPullbackOrderUsdc}, confirmSeconds=${cfg.trendPullbackTriggerConfirmSeconds}, maxOrderAgeSeconds=${cfg.trendPullbackMaxOrderAgeSeconds}, maxBtcReversalBps=${cfg.trendPullbackMaxBtcReversalBps}`);
+    } else {
+        console.log(`Params: minEdge=${cfg.minEdge}, orderUsdc=${cfg.orderUsdc}, maxUsdcPerLeg=${cfg.maxUsdcPerLeg}, volPerInterval=${cfg.volPerInterval}`);
+    }
     console.log(`Trades CSV: ${cfg.outputTradesPath}`);
 }
 
@@ -667,6 +1067,12 @@ function runStrategy(cfg: BacktestConfig, records: Record<string, string>[]): { 
             return runMarketMakerBacktest(rows, cfg);
         case "hybrid":
             return runHybridBacktest(rows, cfg);
+        case "managed-edge":
+            return runManagedEdgeBacktest(rows, cfg);
+        case "adaptive-edge":
+            return runAdaptiveEdgeBacktest(rows, cfg);
+        case "trend-pullback":
+            return runTrendPullbackBacktest(rows, cfg);
         default:
             throw new Error(`Unsupported strategy: ${cfg.strategy}`);
     }
