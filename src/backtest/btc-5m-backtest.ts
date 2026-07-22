@@ -11,7 +11,7 @@ import { Btc5mRegimeSnapshot } from "../strategies/btc5m/regime";
 import { Btc5mStrategyQuote } from "../strategies/btc5m/types";
 
 type Leg = "UP" | "DOWN";
-type BacktestStrategy = "edge" | "range-arb" | "market-maker" | "hybrid" | "managed-edge" | "adaptive-edge" | "trend-pullback";
+type BacktestStrategy = "edge" | "range-arb" | "market-maker" | "hybrid" | "managed-edge" | "adaptive-edge" | "trend-pullback" | "trend-range-switch";
 
 type BacktestConfig = {
     strategy: BacktestStrategy;
@@ -77,9 +77,14 @@ type BacktestConfig = {
     trendPullbackOrderUsdc: number;
     trendPullbackMaxUsdcPerLeg: number;
     trendPullbackMinSecondsLeftToTrigger: number;
+    trendPullbackMinSecondsLeftToFill: number;
     trendPullbackTriggerConfirmSeconds: number;
     trendPullbackMaxOrderAgeSeconds: number;
     trendPullbackMaxBtcReversalBps: number;
+    trendPullbackPostFillStopLossPrice: number;
+    trendPullbackPostFillTakeProfitPrice: number;
+    trendPullbackPostFillMaxBtcReversalBps: number;
+    trendRangeSwitchFailures: number;
 };
 
 type MarketRow = {
@@ -161,12 +166,13 @@ function envNumber(name: string, fallback: number): number {
 function usage(): string {
     return [
         "Usage:",
-        "  npm run backtest:btc5m -- --strategy <edge|managed-edge|adaptive-edge|trend-pullback|range-arb|market-maker|hybrid> --csv <path>",
+        "  npm run backtest:btc5m -- --strategy <edge|managed-edge|adaptive-edge|trend-pullback|trend-range-switch|range-arb|market-maker|hybrid> --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:edge --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:range-arb --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:market-maker --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:managed-edge --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:trend-pullback --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:trend-range-switch --csv <path>",
         "",
         "Required:",
         "  --strategy <name>   Strategy name. Also supports btc5m:* aliases",
@@ -181,7 +187,8 @@ function usage(): string {
         "  --max-usdc-per-leg <number>  Default: BACKTEST_MAX_USDC_PER_LEG or 10",
         "  --trend-trigger-price <price> Trend-pullback trigger; default 0.85",
         "  --trend-entry-price <price>   Trend-pullback BUY limit; default 0.80",
-        "  --trend-order-usdc <number>   Trend-pullback cost per filled cycle; default 5",
+        "  --trend-order-usdc <number>   Trend-pullback cost per filled cycle; default 1.6",
+        "  --switch-failures <count>     Trend/range consecutive-loss threshold; default 2",
     ].join("\n");
 }
 
@@ -193,6 +200,7 @@ function parseStrategy(value: string | undefined): BacktestStrategy {
     if (value === "managed-edge" || value === "btc5m:managed-edge") return "managed-edge";
     if (value === "adaptive-edge" || value === "btc5m:adaptive-edge") return "adaptive-edge";
     if (value === "trend-pullback" || value === "btc5m:trend-pullback") return "trend-pullback";
+    if (value === "trend-range-switch" || value === "btc5m:trend-range-switch") return "trend-range-switch";
     throw new Error(`Unsupported or missing strategy: ${value || "(empty)"}\n\n${usage()}`);
 }
 
@@ -265,12 +273,17 @@ function loadConfig(): BacktestConfig {
         adaptiveScalpProfitPct: Number(getArgValue("--adaptive-scalp-profit-pct") ?? envNumber("ADAPTIVE_EDGE_SCALP_PROFIT_PCT", 0.25)),
         trendPullbackTriggerPrice: Number(getArgValue("--trend-trigger-price") ?? envNumber("TREND_PULLBACK_TRIGGER_PRICE", 0.85)),
         trendPullbackEntryPrice: Number(getArgValue("--trend-entry-price") ?? envNumber("TREND_PULLBACK_ENTRY_PRICE", 0.80)),
-        trendPullbackOrderUsdc: Number(getArgValue("--trend-order-usdc") ?? envNumber("TREND_PULLBACK_ORDER_USDC", 5)),
-        trendPullbackMaxUsdcPerLeg: Number(getArgValue("--trend-max-usdc-per-leg") ?? envNumber("TREND_PULLBACK_MAX_USDC_PER_LEG", 5)),
+        trendPullbackOrderUsdc: Number(getArgValue("--trend-order-usdc") ?? envNumber("TREND_PULLBACK_ORDER_USDC", 1.6)),
+        trendPullbackMaxUsdcPerLeg: Number(getArgValue("--trend-max-usdc-per-leg") ?? envNumber("TREND_PULLBACK_MAX_USDC_PER_LEG", 1.6)),
         trendPullbackMinSecondsLeftToTrigger: Number(getArgValue("--trend-min-seconds-left-to-trigger") ?? envNumber("TREND_PULLBACK_MIN_SECONDS_LEFT_TO_TRIGGER", 30)),
+        trendPullbackMinSecondsLeftToFill: Number(getArgValue("--trend-min-seconds-left-to-fill") ?? envNumber("TREND_PULLBACK_MIN_SECONDS_LEFT_TO_FILL", 0)),
         trendPullbackTriggerConfirmSeconds: Number(getArgValue("--trend-trigger-confirm-seconds") ?? envNumber("TREND_PULLBACK_TRIGGER_CONFIRM_SECONDS", 0)),
-        trendPullbackMaxOrderAgeSeconds: Number(getArgValue("--trend-max-order-age-seconds") ?? envNumber("TREND_PULLBACK_MAX_ORDER_AGE_SECONDS", 0)),
-        trendPullbackMaxBtcReversalBps: Number(getArgValue("--trend-max-btc-reversal-bps") ?? envNumber("TREND_PULLBACK_MAX_BTC_REVERSAL_BPS", 8)),
+        trendPullbackMaxOrderAgeSeconds: Number(getArgValue("--trend-max-order-age-seconds") ?? envNumber("TREND_PULLBACK_MAX_ORDER_AGE_SECONDS", 8)),
+        trendPullbackMaxBtcReversalBps: Number(getArgValue("--trend-max-btc-reversal-bps") ?? envNumber("TREND_PULLBACK_MAX_BTC_REVERSAL_BPS", 2)),
+        trendPullbackPostFillStopLossPrice: Number(getArgValue("--trend-post-fill-stop-loss-price") ?? envNumber("TREND_PULLBACK_POST_FILL_STOP_LOSS_PRICE", 0)),
+        trendPullbackPostFillTakeProfitPrice: Number(getArgValue("--trend-post-fill-take-profit-price") ?? envNumber("TREND_PULLBACK_POST_FILL_TAKE_PROFIT_PRICE", 0)),
+        trendPullbackPostFillMaxBtcReversalBps: Number(getArgValue("--trend-post-fill-max-btc-reversal-bps") ?? envNumber("TREND_PULLBACK_POST_FILL_MAX_BTC_REVERSAL_BPS", 0)),
+        trendRangeSwitchFailures: Number(getArgValue("--switch-failures") ?? envNumber("TREND_RANGE_SWITCH_FAILURES", 2)),
     };
 
     if (!cfg.csvPath) throw new Error(`Missing --csv <path> or BACKTEST_CSV\n\n${usage()}`);
@@ -311,9 +324,14 @@ function loadConfig(): BacktestConfig {
     if (cfg.trendPullbackOrderUsdc <= 0) throw new Error("TREND_PULLBACK_ORDER_USDC must be > 0");
     if (cfg.trendPullbackMaxUsdcPerLeg < 0) throw new Error("TREND_PULLBACK_MAX_USDC_PER_LEG must be >= 0");
     if (cfg.trendPullbackMinSecondsLeftToTrigger < 0) throw new Error("TREND_PULLBACK_MIN_SECONDS_LEFT_TO_TRIGGER must be >= 0");
+    if (cfg.trendPullbackMinSecondsLeftToFill < 0) throw new Error("TREND_PULLBACK_MIN_SECONDS_LEFT_TO_FILL must be >= 0");
     if (cfg.trendPullbackTriggerConfirmSeconds < 0) throw new Error("TREND_PULLBACK_TRIGGER_CONFIRM_SECONDS must be >= 0");
     if (cfg.trendPullbackMaxOrderAgeSeconds < 0) throw new Error("TREND_PULLBACK_MAX_ORDER_AGE_SECONDS must be >= 0");
     if (cfg.trendPullbackMaxBtcReversalBps < 0) throw new Error("TREND_PULLBACK_MAX_BTC_REVERSAL_BPS must be >= 0");
+    if (!(cfg.trendPullbackPostFillStopLossPrice >= 0 && cfg.trendPullbackPostFillStopLossPrice < cfg.trendPullbackEntryPrice)) throw new Error("TREND_PULLBACK_POST_FILL_STOP_LOSS_PRICE must be >= 0 and below entry price");
+    if (!(cfg.trendPullbackPostFillTakeProfitPrice >= 0 && cfg.trendPullbackPostFillTakeProfitPrice <= 1)) throw new Error("TREND_PULLBACK_POST_FILL_TAKE_PROFIT_PRICE must be between 0 and 1");
+    if (cfg.trendPullbackPostFillMaxBtcReversalBps < 0) throw new Error("TREND_PULLBACK_POST_FILL_MAX_BTC_REVERSAL_BPS must be >= 0");
+    if (!Number.isInteger(cfg.trendRangeSwitchFailures) || cfg.trendRangeSwitchFailures < 1) throw new Error("TREND_RANGE_SWITCH_FAILURES must be a positive integer");
     return cfg;
 }
 
@@ -766,7 +784,7 @@ function runMarketMakerBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycle
     return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
 }
 
-function runTrendPullbackBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+function runTrendPullbackBacktest(rows: MarketRow[], cfg: BacktestConfig, logStats = true): { cycles: CycleState[]; trades: Trade[] } {
     const cycles = createCycleMap(rows, cfg);
     const states = new Map<string, Btc5mTrendPullbackState>();
     let triggeredCycles = 0;
@@ -784,6 +802,8 @@ function runTrendPullbackBacktest(rows: MarketRow[], cfg: BacktestConfig): { cyc
             endMs: cycle.endMs,
             upAsk: row.upAsk,
             downAsk: row.downAsk,
+            upBid: row.upBid,
+            downBid: row.downBid,
             btcPrice: row.btcPrice,
             spentUp: cycle.spentUp,
             spentDown: cycle.spentDown,
@@ -794,9 +814,13 @@ function runTrendPullbackBacktest(rows: MarketRow[], cfg: BacktestConfig): { cyc
                 orderUsdc: cfg.trendPullbackOrderUsdc,
                 maxUsdcPerLeg: cfg.trendPullbackMaxUsdcPerLeg,
                 minSecondsLeftToTrigger: cfg.trendPullbackMinSecondsLeftToTrigger,
+                minSecondsLeftToFill: cfg.trendPullbackMinSecondsLeftToFill,
                 triggerConfirmSeconds: cfg.trendPullbackTriggerConfirmSeconds,
                 maxOrderAgeSeconds: cfg.trendPullbackMaxOrderAgeSeconds,
                 maxBtcReversalBps: cfg.trendPullbackMaxBtcReversalBps,
+                postFillStopLossPrice: cfg.trendPullbackPostFillStopLossPrice,
+                postFillTakeProfitPrice: cfg.trendPullbackPostFillTakeProfitPrice,
+                postFillMaxBtcReversalBps: cfg.trendPullbackPostFillMaxBtcReversalBps,
             },
         });
         if (!previousState.triggeredLeg && decision.state.triggeredLeg) triggeredCycles++;
@@ -807,16 +831,101 @@ function runTrendPullbackBacktest(rows: MarketRow[], cfg: BacktestConfig): { cyc
         const isLaterSnapshot = decision.state.triggeredAtMs !== undefined && row.timestampMs > decision.state.triggeredAtMs;
         if (quote && quote.side === "BUY" && isLaterSnapshot && ask > 0 && ask <= quote.price) {
             buyAtPrice(cycle, row, quote.leg, quote.price, quote.price * quote.size, quote.fair, quote.edge, quote.note);
-            decision.state = { ...decision.state, filled: true };
+            decision.state = {
+                ...decision.state,
+                filled: true,
+                filledAtMs: row.timestampMs,
+                fillPrice: quote.price,
+                filledShares: quote.size,
+            };
             filledCycles++;
+        } else if (quote?.side === "SELL") {
+            sellAtPrice(cycle, row, quote.leg, quote.price, quote.size, quote.fair, quote.edge, quote.note);
+            decision.state = { ...decision.state, exited: true };
         }
         states.set(row.slug, decision.state);
     }
 
-    settleCycles(cycles);
-    console.log(`Trend-pullback orders: triggered=${triggeredCycles}, filled=${filledCycles}, cancelled=${cancelledCycles}, fill rate=${triggeredCycles ? (filledCycles / triggeredCycles * 100).toFixed(2) : "0.00"}%`);
+    settleTrendPullbackCycles(cycles);
+    if (logStats) console.log(`Trend-pullback orders: triggered=${triggeredCycles}, filled=${filledCycles}, cancelled=${cancelledCycles}, fill rate=${triggeredCycles ? (filledCycles / triggeredCycles * 100).toFixed(2) : "0.00"}%`);
     const cycleList = Array.from(cycles.values()).sort((a, b) => a.startMs - b.startMs);
     return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
+function runTrendRangeSwitchBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    type Mode = "trend-pullback" | "range-arb";
+    const rowsBySlug = new Map<string, MarketRow[]>();
+    for (const row of rows) {
+        if (!rowsBySlug.has(row.slug)) rowsBySlug.set(row.slug, []);
+        rowsBySlug.get(row.slug)!.push(row);
+    }
+    const cycleRows = Array.from(rowsBySlug.values()).sort((left, right) => left[0].timestampMs - right[0].timestampMs);
+    const cycles: CycleState[] = [];
+    let mode: Mode = "trend-pullback";
+    let consecutiveFailures = 0;
+    let switches = 0;
+    const modeStats = {
+        "trend-pullback": { cycles: 0, traded: 0, failures: 0, pnl: 0 },
+        "range-arb": { cycles: 0, traded: 0, failures: 0, pnl: 0 },
+    };
+
+    for (const rowsForCycle of cycleRows) {
+        const activeMode = mode;
+        const result = activeMode === "trend-pullback"
+            ? runTrendPullbackBacktest(rowsForCycle, cfg, false)
+            : runRangeArbBacktest(rowsForCycle, cfg);
+        const cycle = result.cycles[0];
+        if (!cycle) continue;
+        modeStats[activeMode].cycles++;
+        for (const trade of cycle.trades) trade.note = `trend-range-switch mode=${activeMode}; ${trade.note ?? ""}`.trim();
+        const cost = cycle.trades.reduce((sum, trade) => sum + trade.cost, 0);
+        const payout = cycle.trades.reduce((sum, trade) => sum + (trade.payout ?? 0), 0);
+        const pnl = payout - cost;
+        modeStats[activeMode].pnl += pnl;
+        if (cost > 0) {
+            modeStats[activeMode].traded++;
+            if (pnl < 0) {
+                consecutiveFailures++;
+                modeStats[activeMode].failures++;
+            } else {
+                consecutiveFailures = 0;
+            }
+            if (consecutiveFailures >= cfg.trendRangeSwitchFailures) {
+                mode = activeMode === "trend-pullback" ? "range-arb" : "trend-pullback";
+                console.log(`Mode switch after ${cycle.slug}: ${activeMode} -> ${mode} after ${cfg.trendRangeSwitchFailures} consecutive losing traded cycles`);
+                consecutiveFailures = 0;
+                switches++;
+            }
+        }
+        cycles.push(cycle);
+    }
+
+    console.log(`Trend-range switch: threshold=${cfg.trendRangeSwitchFailures}, switches=${switches}, finalMode=${mode}`);
+    console.log(`  trend-pullback: cycles=${modeStats["trend-pullback"].cycles}, traded=${modeStats["trend-pullback"].traded}, failures=${modeStats["trend-pullback"].failures}, pnl=${modeStats["trend-pullback"].pnl.toFixed(4)}`);
+    console.log(`  range-arb@${cfg.rangePriceX.toFixed(2)}: cycles=${modeStats["range-arb"].cycles}, traded=${modeStats["range-arb"].traded}, failures=${modeStats["range-arb"].failures}, pnl=${modeStats["range-arb"].pnl.toFixed(4)}`);
+    return { cycles, trades: cycles.flatMap((cycle) => cycle.trades) };
+}
+
+function settleTrendPullbackCycles(cycles: Map<string, CycleState>): void {
+    for (const cycle of cycles.values()) {
+        const winner = inferWinner(cycle);
+        const shares = winner === "UP" ? cycle.inventoryUp : winner === "DOWN" ? cycle.inventoryDown : 0;
+        if (winner && shares > 0) {
+            cycle.trades.push({
+                slug: cycle.slug,
+                timestampMs: cycle.endMs,
+                leg: winner,
+                price: 1,
+                shares,
+                cost: 0,
+                finalPrice: cycle.finalPrice,
+                payout: shares,
+                pnl: shares,
+                note: "trend-pullback settlement",
+            });
+        }
+        for (const trade of cycle.trades) trade.finalPrice = trade.finalPrice ?? cycle.finalPrice;
+    }
 }
 
 function createCycleMap(rows: MarketRow[], cfg: BacktestConfig): Map<string, CycleState> {
@@ -959,10 +1068,22 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
     console.log(`Strategy: ${cfg.strategy}`);
     console.log(`CSV: ${cfg.csvPath}`);
     console.log(`Cycles: ${cycles.length}, traded cycles: ${tradedCycles}`);
-    console.log(`Trades: ${trades.length}, winners: ${winners}, win rate: ${trades.length ? (winners / trades.length * 100).toFixed(2) : "0.00"}%`);
+    if (cfg.strategy === "trend-pullback" || cfg.strategy === "trend-range-switch") {
+        const entries = trades.filter((trade) => trade.cost > 0);
+        const profitableCycles = cycles.filter((cycle) => {
+            const cost = cycle.trades.reduce((sum, trade) => sum + trade.cost, 0);
+            const payout = cycle.trades.reduce((sum, trade) => sum + (trade.payout ?? 0), 0);
+            return cost > 0 && payout > cost;
+        }).length;
+        console.log(`Entries: ${entries.length}, profitable cycles: ${profitableCycles}, cycle win rate: ${tradedCycles ? (profitableCycles / tradedCycles * 100).toFixed(2) : "0.00"}%`);
+    } else {
+        console.log(`Trades: ${trades.length}, winners: ${winners}, win rate: ${trades.length ? (winners / trades.length * 100).toFixed(2) : "0.00"}%`);
+    }
     console.log(`Cost: ${totalCost.toFixed(4)}, payout: ${totalPayout.toFixed(4)}, PnL: ${totalPnl.toFixed(4)}, ROI: ${(roi * 100).toFixed(2)}%`);
     if (cfg.strategy === "trend-pullback") {
-        console.log(`Params: trigger=${cfg.trendPullbackTriggerPrice}, entry=${cfg.trendPullbackEntryPrice}, orderUsdc=${cfg.trendPullbackOrderUsdc}, confirmSeconds=${cfg.trendPullbackTriggerConfirmSeconds}, maxOrderAgeSeconds=${cfg.trendPullbackMaxOrderAgeSeconds}, maxBtcReversalBps=${cfg.trendPullbackMaxBtcReversalBps}`);
+        console.log(`Params: trigger=${cfg.trendPullbackTriggerPrice}, entry=${cfg.trendPullbackEntryPrice}, orderUsdc=${cfg.trendPullbackOrderUsdc}, minSecondsLeftToFill=${cfg.trendPullbackMinSecondsLeftToFill}, confirmSeconds=${cfg.trendPullbackTriggerConfirmSeconds}, maxOrderAgeSeconds=${cfg.trendPullbackMaxOrderAgeSeconds}, maxBtcReversalBps=${cfg.trendPullbackMaxBtcReversalBps}`);
+    } else if (cfg.strategy === "trend-range-switch") {
+        console.log(`Params: switchFailures=${cfg.trendRangeSwitchFailures}, rangePrice=${cfg.rangePriceX}, trendTrigger=${cfg.trendPullbackTriggerPrice}, trendEntry=${cfg.trendPullbackEntryPrice}, trendMaxOrderAgeSeconds=${cfg.trendPullbackMaxOrderAgeSeconds}`);
     } else {
         console.log(`Params: minEdge=${cfg.minEdge}, orderUsdc=${cfg.orderUsdc}, maxUsdcPerLeg=${cfg.maxUsdcPerLeg}, volPerInterval=${cfg.volPerInterval}`);
     }
@@ -1073,6 +1194,8 @@ function runStrategy(cfg: BacktestConfig, records: Record<string, string>[]): { 
             return runAdaptiveEdgeBacktest(rows, cfg);
         case "trend-pullback":
             return runTrendPullbackBacktest(rows, cfg);
+        case "trend-range-switch":
+            return runTrendRangeSwitchBacktest(rows, cfg);
         default:
             throw new Error(`Unsupported strategy: ${cfg.strategy}`);
     }

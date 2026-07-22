@@ -6,9 +6,13 @@ export type Btc5mTrendPullbackParams = {
     orderUsdc: number;
     maxUsdcPerLeg: number;
     minSecondsLeftToTrigger: number;
+    minSecondsLeftToFill: number;
     triggerConfirmSeconds: number;
     maxOrderAgeSeconds: number;
     maxBtcReversalBps: number;
+    postFillStopLossPrice: number;
+    postFillTakeProfitPrice: number;
+    postFillMaxBtcReversalBps: number;
 };
 
 export type Btc5mTrendPullbackState = {
@@ -18,6 +22,10 @@ export type Btc5mTrendPullbackState = {
     candidateLeg?: Btc5mLeg;
     candidateSinceMs?: number;
     filled?: boolean;
+    filledAtMs?: number;
+    fillPrice?: number;
+    filledShares?: number;
+    exited?: boolean;
     cancelled?: boolean;
 };
 
@@ -26,6 +34,8 @@ export type Btc5mTrendPullbackInput = {
     endMs: number;
     upAsk?: number;
     downAsk?: number;
+    upBid?: number;
+    downBid?: number;
     btcPrice?: number;
     spentUp: number;
     spentDown: number;
@@ -39,7 +49,7 @@ export type Btc5mTrendPullbackDecision = Btc5mStrategyDecision & {
 
 export function buildBtc5mTrendPullbackOrders(input: Btc5mTrendPullbackInput): Btc5mTrendPullbackDecision {
     if (input.state.filled) {
-        return { quotes: [], state: input.state, reason: "trend-pullback filled" };
+        return buildPostFillDecision(input);
     }
     if (input.state.cancelled) {
         return { quotes: [], state: input.state, reason: "trend-pullback cancelled" };
@@ -82,6 +92,10 @@ export function buildBtc5mTrendPullbackOrders(input: Btc5mTrendPullbackInput): B
 
     const leg = state.triggeredLeg;
     if (!leg) return { quotes: [], state, reason: "trend-pullback waiting for trigger" };
+    if (secondsLeft < input.params.minSecondsLeftToFill) {
+        state = { ...state, cancelled: true };
+        return { quotes: [], state, reason: "trend-pullback cancelled: too late to fill" };
+    }
     const orderAgeSeconds = state.triggeredAtMs === undefined ? 0 : (input.timestampMs - state.triggeredAtMs) / 1000;
     if (input.params.maxOrderAgeSeconds > 0 && orderAgeSeconds > input.params.maxOrderAgeSeconds) {
         state = { ...state, cancelled: true };
@@ -112,6 +126,42 @@ export function buildBtc5mTrendPullbackOrders(input: Btc5mTrendPullbackInput): B
         }],
         state,
         reason: `trend-pullback ${leg} pending at ${input.params.entryPrice.toFixed(2)}`,
+    };
+}
+
+function buildPostFillDecision(input: Btc5mTrendPullbackInput): Btc5mTrendPullbackDecision {
+    const state = input.state;
+    if (state.exited) return { quotes: [], state, reason: "trend-pullback exited" };
+    const leg = state.triggeredLeg;
+    const shares = state.filledShares ?? 0;
+    if (!leg || shares <= 0) return { quotes: [], state, reason: "trend-pullback filled" };
+    const bid = leg === "UP" ? input.upBid : input.downBid;
+    if (bid === undefined || bid <= 0) return { quotes: [], state, reason: "trend-pullback filled: waiting for bid" };
+
+    let exitReason: string | undefined;
+    if (input.params.postFillTakeProfitPrice > 0 && bid >= input.params.postFillTakeProfitPrice) {
+        exitReason = `take-profit ${bid.toFixed(2)}`;
+    } else if (input.params.postFillStopLossPrice > 0 && bid <= input.params.postFillStopLossPrice) {
+        exitReason = `stop-loss ${bid.toFixed(2)}`;
+    } else {
+        const reversalBps = calculateBtcReversalBps(leg, state.triggeredBtcPrice, input.btcPrice);
+        if (input.params.postFillMaxBtcReversalBps > 0 && reversalBps > input.params.postFillMaxBtcReversalBps) {
+            exitReason = `BTC reversal ${reversalBps.toFixed(2)}bps`;
+        }
+    }
+    if (!exitReason) return { quotes: [], state, reason: "trend-pullback holding" };
+
+    return {
+        quotes: [{
+            key: `${leg}:SELL`,
+            leg,
+            side: "SELL",
+            price: bid,
+            size: shares,
+            note: `trend-pullback ${exitReason}`,
+        }],
+        state,
+        reason: `trend-pullback exit: ${exitReason}`,
     };
 }
 

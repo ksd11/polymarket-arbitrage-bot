@@ -161,7 +161,8 @@ npm run btc5m:managed-edge
 `trend-pullback` is a strong-trend pullback strategy. When the first UP or DOWN ask reaches `TREND_PULLBACK_TRIGGER_PRICE`, it keeps a BUY limit at `TREND_PULLBACK_ENTRY_PRICE`. Each cycle follows only the first triggered leg.
 
 Optional guards under `TREND_PULLBACK_*` can require the trigger to persist, expire a stale pending order, and cancel after an adverse BTC move from the trigger point.
-The default `TREND_PULLBACK_MAX_BTC_REVERSAL_BPS=8` cancels the pending limit if BTC moves eight basis points against the triggered direction.
+The default `TREND_PULLBACK_MAX_ORDER_AGE_SECONDS=8` expires stale pullback orders, and `TREND_PULLBACK_MAX_BTC_REVERSAL_BPS=2` cancels the pending limit after a small adverse BTC move. These tighter defaults reduce adverse selection observed in live fills. Optional post-fill stop-loss, take-profit, and BTC-reversal exits remain disabled by default because a fixed `0.95` take-profit reduced returns in both the live-log simulation and the historical sample.
+With the default `TREND_PULLBACK_ENTRY_PRICE=0.80` and `TREND_PULLBACK_ORDER_USDC=1.6`, each filled cycle buys exactly two shares and caps that leg at 1.6 USDC.
 
 ```bash
 npm run backtest:btc5m -- --strategy btc5m:trend-pullback --csv data/btc5m-history.csv
@@ -175,11 +176,18 @@ TREND_PULLBACK_DRY_RUN=true npm run btc5m:trend-pullback
 
 Dry-run records a simulated fill only when a later ask reaches the posted limit. Market snapshots, strategy state, decisions, and order events are appended to `TREND_PULLBACK_RECORD_FILE`. After reviewing the CSV, set `TREND_PULLBACK_DRY_RUN=false` in `.env` to post real GTC orders.
 
+The live recorder also writes `resolution` rows with the winning outcome, payout, and net PnL. If the CSV schema changes, the runner preserves the existing file and automatically continues in a `-v2`, `-v3`, and so on file.
+
 `--strategy` and `--csv` are required. Supported strategy names:
 - `edge` or `btc5m:edge` — Standalone BTC fair-probability mispricing strategy; requires `btc_price` and `open_price`.
 - `managed-edge` or `btc5m:managed-edge` — Edge strategy with entry windows, cheap-late-buy filter, take-profit, stop-loss, and force-exit logic.
 - `adaptive-edge` or `btc5m:adaptive-edge` — Backtest-only regime strategy that switches between trending edge, oscillating scalp, and panic-discount entries.
 - `trend-pullback` or `btc5m:trend-pullback` — Backtests a strong-trend trigger followed by a lower persistent BUY limit; `npm run btc5m:trend-pullback` runs it live or in dry-run mode.
+- `trend-range-switch` or `btc5m:trend-range-switch` — Starts in trend-pullback, switches to range-arb after consecutive losing traded cycles, and switches back using the same rule. Configure the threshold with `TREND_RANGE_SWITCH_FAILURES`.
+
+```bash
+npm run backtest:btc5m -- --strategy btc5m:trend-range-switch --switch-failures 2 --range-price-x 0.40 --csv data/btc5m-history-8.csv
+```
 - `range-arb` or `btc5m:range-arb` — Backtests the fixed-price `RANGE_ARB_PRICE_X` / `RANGE_ARB_USDC_PER_LEG` strategy.
 - `market-maker` or `btc5m:market-maker` — Backtests the current bid-quoting market-maker logic using `MM_` parameters.
 - `hybrid` or `btc5m:hybrid` — Backtests the regime-switching edge/range-arb strategy.
