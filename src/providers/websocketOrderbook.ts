@@ -51,6 +51,7 @@ export class WebSocketOrderBook {
     public subscribedAssetIds: Set<string> = new Set();
     private tokenLabels: Map<string, string> = new Map(); // Map tokenId to "Up" or "Down"
     private tokenPairPartner: Map<string, string> = new Map(); // Map tokenId to its pair (Up<->Down)
+    private priceLogTimestamps: Map<string, number> = new Map();
     private reconnectAttempts = 0;
     private maxReconnectAttempts = 20;
     private reconnectDelayMs = 0; // Reconnect immediately on disconnect
@@ -61,7 +62,8 @@ export class WebSocketOrderBook {
     constructor(
         channelType: typeof MARKET_CHANNEL | typeof USER_CHANNEL,
         assetIds: string[],
-        auth: ApiKeyCreds | null = null
+        auth: ApiKeyCreds | null = null,
+        private priceLogIntervalMs = 0
     ) {
         this.channelType = channelType;
         this.url = WS_URL;
@@ -407,10 +409,12 @@ export class WebSocketOrderBook {
                 const downAsk = this.tokenPrices.get(downId)?.bestAsk ?? null;
                 const upStr = upAsk !== null ? upAsk.toFixed(4) : "--";
                 const downStr = downAsk !== null ? downAsk.toFixed(4) : "--";
-                logger.info(`📊 Up Ask: ${upStr} | Down Ask: ${downStr}`);
+                if (upAsk !== null && downAsk !== null && this.shouldLogPrice(`${upId}:${downId}`)) {
+                    logger.info(`📊 Up Ask: ${upStr} | Down Ask: ${downStr}`);
+                }
             } else {
                 const label = this.tokenLabels.get(assetId) || "Unknown";
-                logger.info(`📊 ${label} Ask: ${bestAsk.toFixed(4)}`);
+                if (this.shouldLogPrice(assetId)) logger.info(`📊 ${label} Ask: ${bestAsk.toFixed(4)}`);
             }
         }
 
@@ -419,6 +423,15 @@ export class WebSocketOrderBook {
         if (callback) {
             callback(assetId, price);
         }
+    }
+
+    private shouldLogPrice(key: string): boolean {
+        if (this.priceLogIntervalMs <= 0) return true;
+        const now = Date.now();
+        const lastLoggedAt = this.priceLogTimestamps.get(key) ?? 0;
+        if (now - lastLoggedAt < this.priceLogIntervalMs) return false;
+        this.priceLogTimestamps.set(key, now);
+        return true;
     }
 
     /**
@@ -511,6 +524,17 @@ export class WebSocketOrderBook {
      */
     isReady(): boolean {
         return this.isConnected && this.ws?.readyState === WebSocket.OPEN;
+    }
+
+    forceReconnect(reason: string): void {
+        logger.warning(`Forcing WebSocket reconnect: ${reason}`);
+        this.shouldReconnect = true;
+        this.reconnectAttempts = 0;
+        if (this.ws) {
+            this.ws.terminate();
+            return;
+        }
+        void this.connect().catch((error) => logger.error(`Forced WebSocket reconnect failed: ${error instanceof Error ? error.message : String(error)}`));
     }
 }
 

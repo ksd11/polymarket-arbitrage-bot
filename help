@@ -21,3 +21,12 @@ npm run collect:btc5m-history -- --duration-minutes 30 --out-dir data
 
 # 回测
 npm run backtest:btc5m -- --strategy edge --csv /tmp/btc5m-backtest-sample.csv
+
+
+
+TREND_PULLBACK_DRY_RUN=false \
+TREND_PULLBACK_MAX_ORDER_AGE_SECONDS=8 \
+TREND_PULLBACK_MAX_BTC_REVERSAL_BPS=2 \
+TREND_PULLBACK_POST_FILL_TAKE_PROFIT_PRICE=0 \
+TREND_PULLBACK_RECORD_FILE="data/btc5m-trend-pullback-optimized-$(date +%Y%m%d-%H%M%S).csv" \
+npm run btc5m:trend-pullback

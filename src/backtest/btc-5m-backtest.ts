@@ -7,11 +7,18 @@ import { buildBtc5mHybridOrders, PriceSnapshot } from "../strategies/btc5m/hybri
 import { buildBtc5mManagedEdgeOrders } from "../strategies/btc5m/managed-edge";
 import { buildBtc5mAdaptiveEdgeOrders } from "../strategies/btc5m/adaptive-edge";
 import { buildBtc5mTrendPullbackOrders, Btc5mTrendPullbackState } from "../strategies/btc5m/trend-pullback";
+import { classifyPreviousCycleRegime } from "../strategies/btc5m/trend-range-regime";
+import { buildBtc5mRangePairOrders, Btc5mRangePairState } from "../strategies/btc5m/range-pair";
+import { buildBtc5mSustainedHighOrders, Btc5mSustainedHighState } from "../strategies/btc5m/sustained-high";
+import { buildBtc5mLatencyScalpOrders, Btc5mLatencyScalpState } from "../strategies/btc5m/latency-scalp";
+import { buildBtc5mDeepReboundOrders } from "../strategies/btc5m/deep-rebound";
+import { buildBtc5mExtreme020ReboundOrders, Btc5mExtreme020Position } from "../strategies/btc5m/extreme-020-rebound";
+import { buildBtc5mFinal30HighOrders } from "../strategies/btc5m/final-30-high";
 import { Btc5mRegimeSnapshot } from "../strategies/btc5m/regime";
 import { Btc5mStrategyQuote } from "../strategies/btc5m/types";
 
 type Leg = "UP" | "DOWN";
-type BacktestStrategy = "edge" | "range-arb" | "market-maker" | "hybrid" | "managed-edge" | "adaptive-edge" | "trend-pullback" | "trend-range-switch";
+type BacktestStrategy = "edge" | "range-arb" | "market-maker" | "hybrid" | "managed-edge" | "adaptive-edge" | "trend-pullback" | "trend-range-switch" | "trend-range-regime" | "trend-range-overlay" | "adaptive-overlay" | "sustained-high" | "latency-scalp" | "deep-rebound" | "extreme-020-rebound" | "final-30-high";
 
 type BacktestConfig = {
     strategy: BacktestStrategy;
@@ -85,6 +92,74 @@ type BacktestConfig = {
     trendPullbackPostFillTakeProfitPrice: number;
     trendPullbackPostFillMaxBtcReversalBps: number;
     trendRangeSwitchFailures: number;
+    trendRangeRegimeBandLower: number;
+    trendRangeRegimeBandUpper: number;
+    trendRangeRegimeMinBandRatio: number;
+    trendRangeRegimeMinCrossCount: number;
+    trendRangeRegimeMinPriceRange: number;
+    trendRangeRegimeCenterBuffer: number;
+    trendRangeRegimeMinChoppiness: number;
+    trendRangeRegimeIgnoreFinalSeconds: number;
+    trendRangeRegimeMinSamples: number;
+    trendRangeRegimeRangePrice: number;
+    trendRangeRegimeRangeUsdcPerLeg: number;
+    trendRangeOverlayRangeFirstPrice: number;
+    trendRangeOverlayRangeSecondPrice: number;
+    trendRangeOverlayMaxTotalUsdc: number;
+    trendRangeOverlayTrendTakeProfitPrice: number;
+    sustainedHighTriggerPrice: number;
+    sustainedHighConfirmSeconds: number;
+    sustainedHighEntryPrice: number;
+    sustainedHighOrderUsdc: number;
+    sustainedHighMaxSecondsLeftToTrigger: number;
+    sustainedHighMinSecondsLeftToTrigger: number;
+    sustainedHighMinSecondsLeftToFill: number;
+    sustainedHighMaxOrderAgeSeconds: number;
+    sustainedHighMinBtcMoveBps: number;
+    sustainedHighMaxBtcReversalBps: number;
+    latencyScalpMinSignalPrice: number;
+    latencyScalpTriggerConfirmSeconds: number;
+    latencyScalpSignalLookbackSeconds: number;
+    latencyScalpMinContractMomentum: number;
+    latencyScalpMinBtcMomentumBps: number;
+    latencyScalpEntryPrice: number;
+    latencyScalpTakeProfitPrice: number;
+    latencyScalpOrderUsdc: number;
+    latencyScalpMaxSecondsLeftToTrigger: number;
+    latencyScalpMinSecondsLeftToTrigger: number;
+    latencyScalpMaxEntryOrderAgeSeconds: number;
+    latencyScalpMaxHoldSeconds: number;
+    latencyScalpMinBtcMoveBps: number;
+    latencyScalpMaxBtcReversalBps: number;
+    latencyScalpStopLossPrice: number;
+    latencyScalpForceExitSecondsLeft: number;
+    deepReboundMinEntryPrice: number;
+    deepReboundMaxEntryPrice: number;
+    deepReboundOrderUsdc: number;
+    deepReboundMaxUsdcPerLeg: number;
+    deepReboundScoreThreshold: number;
+    deepReboundMinDiscount: number;
+    deepReboundTakeProfitPrice: number;
+    deepReboundStopLossPct: number;
+    deepReboundMinSecondsLeftToOpen: number;
+    deepReboundMaxSecondsLeftToOpen: number;
+    deepReboundForceExitSecondsLeft: number;
+    extreme020EntryThreshold: number;
+    extreme020TakeProfitDelta: number;
+    extreme020OrderUsdc: number;
+    extreme020MinSecondsLeftToOpen: number;
+    extreme020MaxSecondsLeftToOpen: number;
+    extreme020StopLossPct: number;
+    extreme020MaxHoldSeconds: number;
+    extreme020ForceExitSecondsLeft: number;
+    final30HighTriggerPrice: number;
+    final30HighEarlyTriggerPrice: number;
+    final30HighMaxEntryPrice: number;
+    final30HighOrderShares: number;
+    final30HighMaxSecondsLeftToOpen: number;
+    final30HighEarlyMaxSecondsLeftToOpen: number;
+    final30HighMinSecondsLeftToOpen: number;
+    adaptiveOverlayDeepInRange: boolean;
 };
 
 type MarketRow = {
@@ -156,6 +231,11 @@ function envString(name: string, fallback: string): string {
     return value ? value : fallback;
 }
 
+function booleanValue(value: string | undefined, fallback: boolean): boolean {
+    if (value === undefined) return fallback;
+    return value.trim().toLowerCase() === "true";
+}
+
 function envNumber(name: string, fallback: number): number {
     const raw = process.env[name]?.trim();
     if (!raw) return fallback;
@@ -166,13 +246,21 @@ function envNumber(name: string, fallback: number): number {
 function usage(): string {
     return [
         "Usage:",
-        "  npm run backtest:btc5m -- --strategy <edge|managed-edge|adaptive-edge|trend-pullback|trend-range-switch|range-arb|market-maker|hybrid> --csv <path>",
+        "  npm run backtest:btc5m -- --strategy <edge|managed-edge|adaptive-edge|trend-pullback|sustained-high|latency-scalp|deep-rebound|extreme-020-rebound|final-30-high|trend-range-switch|trend-range-regime|trend-range-overlay|adaptive-overlay|range-arb|market-maker|hybrid> --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:edge --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:range-arb --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:market-maker --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:managed-edge --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:trend-pullback --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:sustained-high --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:latency-scalp --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:deep-rebound --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:extreme-020-rebound --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:final-30-high --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:adaptive-overlay --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:trend-range-switch --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:trend-range-regime --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:trend-range-overlay --csv <path>",
         "",
         "Required:",
         "  --strategy <name>   Strategy name. Also supports btc5m:* aliases",
@@ -188,6 +276,9 @@ function usage(): string {
         "  --trend-trigger-price <price> Trend-pullback trigger; default 0.85",
         "  --trend-entry-price <price>   Trend-pullback BUY limit; default 0.80",
         "  --trend-order-usdc <number>   Trend-pullback cost per filled cycle; default 1.6",
+        "  --sustained-high-trigger <p>  Sustained-high threshold; default 0.90",
+        "  --sustained-high-confirm <s>  Required continuous duration; default 10",
+        "  --sustained-high-entry <p>    BUY limit after confirmation; default 0.90",
         "  --switch-failures <count>     Trend/range consecutive-loss threshold; default 2",
     ].join("\n");
 }
@@ -201,6 +292,14 @@ function parseStrategy(value: string | undefined): BacktestStrategy {
     if (value === "adaptive-edge" || value === "btc5m:adaptive-edge") return "adaptive-edge";
     if (value === "trend-pullback" || value === "btc5m:trend-pullback") return "trend-pullback";
     if (value === "trend-range-switch" || value === "btc5m:trend-range-switch") return "trend-range-switch";
+    if (value === "trend-range-regime" || value === "btc5m:trend-range-regime") return "trend-range-regime";
+    if (value === "trend-range-overlay" || value === "btc5m:trend-range-overlay") return "trend-range-overlay";
+    if (value === "sustained-high" || value === "btc5m:sustained-high") return "sustained-high";
+    if (value === "latency-scalp" || value === "btc5m:latency-scalp") return "latency-scalp";
+    if (value === "deep-rebound" || value === "btc5m:deep-rebound") return "deep-rebound";
+    if (value === "extreme-020-rebound" || value === "btc5m:extreme-020-rebound") return "extreme-020-rebound";
+    if (value === "final-30-high" || value === "btc5m:final-30-high") return "final-30-high";
+    if (value === "adaptive-overlay" || value === "btc5m:adaptive-overlay") return "adaptive-overlay";
     throw new Error(`Unsupported or missing strategy: ${value || "(empty)"}\n\n${usage()}`);
 }
 
@@ -284,6 +383,74 @@ function loadConfig(): BacktestConfig {
         trendPullbackPostFillTakeProfitPrice: Number(getArgValue("--trend-post-fill-take-profit-price") ?? envNumber("TREND_PULLBACK_POST_FILL_TAKE_PROFIT_PRICE", 0)),
         trendPullbackPostFillMaxBtcReversalBps: Number(getArgValue("--trend-post-fill-max-btc-reversal-bps") ?? envNumber("TREND_PULLBACK_POST_FILL_MAX_BTC_REVERSAL_BPS", 0)),
         trendRangeSwitchFailures: Number(getArgValue("--switch-failures") ?? envNumber("TREND_RANGE_SWITCH_FAILURES", 2)),
+        trendRangeRegimeBandLower: Number(getArgValue("--regime-band-lower") ?? envNumber("TREND_RANGE_REGIME_BAND_LOWER", 0.30)),
+        trendRangeRegimeBandUpper: Number(getArgValue("--regime-band-upper") ?? envNumber("TREND_RANGE_REGIME_BAND_UPPER", 0.70)),
+        trendRangeRegimeMinBandRatio: Number(getArgValue("--regime-min-band-ratio") ?? envNumber("TREND_RANGE_REGIME_MIN_BAND_RATIO", 0.70)),
+        trendRangeRegimeMinCrossCount: Number(getArgValue("--regime-min-cross-count") ?? envNumber("TREND_RANGE_REGIME_MIN_CROSS_COUNT", 3)),
+        trendRangeRegimeMinPriceRange: Number(getArgValue("--regime-min-price-range") ?? envNumber("TREND_RANGE_REGIME_MIN_PRICE_RANGE", 0.15)),
+        trendRangeRegimeCenterBuffer: Number(getArgValue("--regime-center-buffer") ?? envNumber("TREND_RANGE_REGIME_CENTER_BUFFER", 0.05)),
+        trendRangeRegimeMinChoppiness: Number(getArgValue("--regime-min-choppiness") ?? envNumber("TREND_RANGE_REGIME_MIN_CHOPPINESS", 3)),
+        trendRangeRegimeIgnoreFinalSeconds: Number(getArgValue("--regime-ignore-final-seconds") ?? envNumber("TREND_RANGE_REGIME_IGNORE_FINAL_SECONDS", 60)),
+        trendRangeRegimeMinSamples: Number(getArgValue("--regime-min-samples") ?? envNumber("TREND_RANGE_REGIME_MIN_SAMPLES", 30)),
+        trendRangeRegimeRangePrice: Number(getArgValue("--regime-range-price") ?? getArgValue("--range-price-x") ?? envNumber("TREND_RANGE_REGIME_RANGE_PRICE", 0.40)),
+        trendRangeRegimeRangeUsdcPerLeg: Number(getArgValue("--regime-range-usdc-per-leg") ?? getArgValue("--range-usdc-per-leg") ?? envNumber("TREND_RANGE_REGIME_RANGE_USDC_PER_LEG", 0.80)),
+        trendRangeOverlayRangeFirstPrice: Number(getArgValue("--overlay-range-first-price") ?? envNumber("TREND_RANGE_OVERLAY_RANGE_FIRST_PRICE", 0.40)),
+        trendRangeOverlayRangeSecondPrice: Number(getArgValue("--overlay-range-second-price") ?? envNumber("TREND_RANGE_OVERLAY_RANGE_SECOND_PRICE", 0.40)),
+        trendRangeOverlayMaxTotalUsdc: Number(getArgValue("--overlay-range-max-total-usdc") ?? envNumber("TREND_RANGE_OVERLAY_RANGE_MAX_TOTAL_USDC", 1.60)),
+        trendRangeOverlayTrendTakeProfitPrice: Number(getArgValue("--overlay-trend-take-profit-price") ?? envNumber("TREND_RANGE_OVERLAY_TREND_TAKE_PROFIT_PRICE", 0)),
+        sustainedHighTriggerPrice: Number(getArgValue("--sustained-high-trigger") ?? envNumber("SUSTAINED_HIGH_TRIGGER_PRICE", 0.90)),
+        sustainedHighConfirmSeconds: Number(getArgValue("--sustained-high-confirm") ?? envNumber("SUSTAINED_HIGH_CONFIRM_SECONDS", 10)),
+        sustainedHighEntryPrice: Number(getArgValue("--sustained-high-entry") ?? envNumber("SUSTAINED_HIGH_ENTRY_PRICE", 0.90)),
+        sustainedHighOrderUsdc: Number(getArgValue("--sustained-high-order-usdc") ?? envNumber("SUSTAINED_HIGH_ORDER_USDC", 4.50)),
+        sustainedHighMaxSecondsLeftToTrigger: Number(getArgValue("--sustained-high-max-seconds-left") ?? envNumber("SUSTAINED_HIGH_MAX_SECONDS_LEFT_TO_TRIGGER", 120)),
+        sustainedHighMinSecondsLeftToTrigger: Number(getArgValue("--sustained-high-min-seconds-left") ?? envNumber("SUSTAINED_HIGH_MIN_SECONDS_LEFT_TO_TRIGGER", 20)),
+        sustainedHighMinSecondsLeftToFill: Number(getArgValue("--sustained-high-min-seconds-left-to-fill") ?? envNumber("SUSTAINED_HIGH_MIN_SECONDS_LEFT_TO_FILL", 20)),
+        sustainedHighMaxOrderAgeSeconds: Number(getArgValue("--sustained-high-max-order-age") ?? envNumber("SUSTAINED_HIGH_MAX_ORDER_AGE_SECONDS", 0)),
+        sustainedHighMinBtcMoveBps: Number(getArgValue("--sustained-high-min-btc-move-bps") ?? envNumber("SUSTAINED_HIGH_MIN_BTC_MOVE_BPS", 3)),
+        sustainedHighMaxBtcReversalBps: Number(getArgValue("--sustained-high-max-btc-reversal-bps") ?? envNumber("SUSTAINED_HIGH_MAX_BTC_REVERSAL_BPS", 2)),
+        latencyScalpMinSignalPrice: Number(getArgValue("--latency-scalp-min-signal-price") ?? envNumber("LATENCY_SCALP_MIN_SIGNAL_PRICE", 0.72)),
+        latencyScalpTriggerConfirmSeconds: Number(getArgValue("--latency-scalp-confirm") ?? envNumber("LATENCY_SCALP_TRIGGER_CONFIRM_SECONDS", 2)),
+        latencyScalpSignalLookbackSeconds: Number(getArgValue("--latency-scalp-signal-lookback") ?? envNumber("LATENCY_SCALP_SIGNAL_LOOKBACK_SECONDS", 5)),
+        latencyScalpMinContractMomentum: Number(getArgValue("--latency-scalp-min-contract-momentum") ?? envNumber("LATENCY_SCALP_MIN_CONTRACT_MOMENTUM", 0.03)),
+        latencyScalpMinBtcMomentumBps: Number(getArgValue("--latency-scalp-min-btc-momentum-bps") ?? envNumber("LATENCY_SCALP_MIN_BTC_MOMENTUM_BPS", 0)),
+        latencyScalpEntryPrice: Number(getArgValue("--latency-scalp-entry") ?? envNumber("LATENCY_SCALP_ENTRY_PRICE", 0.75)),
+        latencyScalpTakeProfitPrice: Number(getArgValue("--latency-scalp-take-profit") ?? envNumber("LATENCY_SCALP_TAKE_PROFIT_PRICE", 0.80)),
+        latencyScalpOrderUsdc: Number(getArgValue("--latency-scalp-order-usdc") ?? envNumber("LATENCY_SCALP_ORDER_USDC", 3.75)),
+        latencyScalpMaxSecondsLeftToTrigger: Number(getArgValue("--latency-scalp-max-seconds-left") ?? envNumber("LATENCY_SCALP_MAX_SECONDS_LEFT_TO_TRIGGER", 180)),
+        latencyScalpMinSecondsLeftToTrigger: Number(getArgValue("--latency-scalp-min-seconds-left") ?? envNumber("LATENCY_SCALP_MIN_SECONDS_LEFT_TO_TRIGGER", 45)),
+        latencyScalpMaxEntryOrderAgeSeconds: Number(getArgValue("--latency-scalp-max-entry-age") ?? envNumber("LATENCY_SCALP_MAX_ENTRY_ORDER_AGE_SECONDS", 15)),
+        latencyScalpMaxHoldSeconds: Number(getArgValue("--latency-scalp-max-hold") ?? envNumber("LATENCY_SCALP_MAX_HOLD_SECONDS", 30)),
+        latencyScalpMinBtcMoveBps: Number(getArgValue("--latency-scalp-min-btc-move-bps") ?? envNumber("LATENCY_SCALP_MIN_BTC_MOVE_BPS", 3)),
+        latencyScalpMaxBtcReversalBps: Number(getArgValue("--latency-scalp-max-btc-reversal-bps") ?? envNumber("LATENCY_SCALP_MAX_BTC_REVERSAL_BPS", 3)),
+        latencyScalpStopLossPrice: Number(getArgValue("--latency-scalp-stop-loss") ?? envNumber("LATENCY_SCALP_STOP_LOSS_PRICE", 0.70)),
+        latencyScalpForceExitSecondsLeft: Number(getArgValue("--latency-scalp-force-exit-seconds-left") ?? envNumber("LATENCY_SCALP_FORCE_EXIT_SECONDS_LEFT", 20)),
+        deepReboundMinEntryPrice: Number(getArgValue("--deep-rebound-min-entry") ?? envNumber("DEEP_REBOUND_MIN_ENTRY_PRICE", 0.03)),
+        deepReboundMaxEntryPrice: Number(getArgValue("--deep-rebound-max-entry") ?? envNumber("DEEP_REBOUND_MAX_ENTRY_PRICE", 0.10)),
+        deepReboundOrderUsdc: Number(getArgValue("--deep-rebound-order-usdc") ?? envNumber("DEEP_REBOUND_ORDER_USDC", 1.01)),
+        deepReboundMaxUsdcPerLeg: Number(getArgValue("--deep-rebound-max-usdc-per-leg") ?? envNumber("DEEP_REBOUND_MAX_USDC_PER_LEG", 1.01)),
+        deepReboundScoreThreshold: Number(getArgValue("--deep-rebound-score") ?? envNumber("DEEP_REBOUND_SCORE_THRESHOLD", 0.20)),
+        deepReboundMinDiscount: Number(getArgValue("--deep-rebound-min-discount") ?? envNumber("DEEP_REBOUND_MIN_DISCOUNT", 0.05)),
+        deepReboundTakeProfitPrice: Number(getArgValue("--deep-rebound-take-profit") ?? envNumber("DEEP_REBOUND_TAKE_PROFIT_PRICE", 0.05)),
+        deepReboundStopLossPct: Number(getArgValue("--deep-rebound-stop-loss-pct") ?? envNumber("DEEP_REBOUND_STOP_LOSS_PCT", 0.50)),
+        deepReboundMinSecondsLeftToOpen: Number(getArgValue("--deep-rebound-min-seconds-left") ?? envNumber("DEEP_REBOUND_MIN_SECONDS_LEFT_TO_OPEN", 60)),
+        deepReboundMaxSecondsLeftToOpen: Number(getArgValue("--deep-rebound-max-seconds-left") ?? envNumber("DEEP_REBOUND_MAX_SECONDS_LEFT_TO_OPEN", 240)),
+        deepReboundForceExitSecondsLeft: Number(getArgValue("--deep-rebound-force-exit-seconds-left") ?? envNumber("DEEP_REBOUND_FORCE_EXIT_SECONDS_LEFT", 30)),
+        extreme020EntryThreshold: Number(getArgValue("--extreme-020-entry") ?? envNumber("EXTREME_020_REBOUND_ENTRY_THRESHOLD", 0.18)),
+        extreme020TakeProfitDelta: Number(getArgValue("--extreme-020-take-profit") ?? envNumber("EXTREME_020_REBOUND_TAKE_PROFIT_DELTA", 0)),
+        extreme020OrderUsdc: Number(getArgValue("--extreme-020-order-usdc") ?? envNumber("EXTREME_020_REBOUND_ORDER_USDC", 1.01)),
+        extreme020MinSecondsLeftToOpen: Number(getArgValue("--extreme-020-min-seconds-left") ?? envNumber("EXTREME_020_REBOUND_MIN_SECONDS_LEFT_TO_OPEN", 120)),
+        extreme020MaxSecondsLeftToOpen: Number(getArgValue("--extreme-020-max-seconds-left") ?? envNumber("EXTREME_020_REBOUND_MAX_SECONDS_LEFT_TO_OPEN", 300)),
+        extreme020StopLossPct: Number(getArgValue("--extreme-020-stop-loss-pct") ?? envNumber("EXTREME_020_REBOUND_STOP_LOSS_PCT", 0)),
+        extreme020MaxHoldSeconds: Number(getArgValue("--extreme-020-max-hold-seconds") ?? envNumber("EXTREME_020_REBOUND_MAX_HOLD_SECONDS", 0)),
+        extreme020ForceExitSecondsLeft: Number(getArgValue("--extreme-020-force-exit-seconds-left") ?? envNumber("EXTREME_020_REBOUND_FORCE_EXIT_SECONDS_LEFT", 0)),
+        final30HighTriggerPrice: Number(getArgValue("--final-30-high-trigger") ?? envNumber("FINAL_30_HIGH_TRIGGER_PRICE", 0.85)),
+        final30HighEarlyTriggerPrice: Number(getArgValue("--final-30-high-early-trigger") ?? envNumber("FINAL_30_HIGH_EARLY_TRIGGER_PRICE", 0.90)),
+        final30HighMaxEntryPrice: Number(getArgValue("--final-30-high-max-entry-price") ?? envNumber("FINAL_30_HIGH_MAX_ENTRY_PRICE", 0.90)),
+        final30HighOrderShares: Number(getArgValue("--final-30-high-shares") ?? envNumber("FINAL_30_HIGH_ORDER_SHARES", 5)),
+        final30HighMaxSecondsLeftToOpen: Number(getArgValue("--final-30-high-max-seconds-left") ?? envNumber("FINAL_30_HIGH_MAX_SECONDS_LEFT_TO_OPEN", 30)),
+        final30HighEarlyMaxSecondsLeftToOpen: Number(getArgValue("--final-30-high-early-max-seconds-left") ?? envNumber("FINAL_30_HIGH_EARLY_MAX_SECONDS_LEFT_TO_OPEN", 30)),
+        final30HighMinSecondsLeftToOpen: Number(getArgValue("--final-30-high-min-seconds-left") ?? envNumber("FINAL_30_HIGH_MIN_SECONDS_LEFT_TO_OPEN", 0)),
+        adaptiveOverlayDeepInRange: booleanValue(getArgValue("--adaptive-overlay-deep-in-range") ?? process.env.ADAPTIVE_OVERLAY_DEEP_IN_RANGE, true),
     };
 
     if (!cfg.csvPath) throw new Error(`Missing --csv <path> or BACKTEST_CSV\n\n${usage()}`);
@@ -332,6 +499,36 @@ function loadConfig(): BacktestConfig {
     if (!(cfg.trendPullbackPostFillTakeProfitPrice >= 0 && cfg.trendPullbackPostFillTakeProfitPrice <= 1)) throw new Error("TREND_PULLBACK_POST_FILL_TAKE_PROFIT_PRICE must be between 0 and 1");
     if (cfg.trendPullbackPostFillMaxBtcReversalBps < 0) throw new Error("TREND_PULLBACK_POST_FILL_MAX_BTC_REVERSAL_BPS must be >= 0");
     if (!Number.isInteger(cfg.trendRangeSwitchFailures) || cfg.trendRangeSwitchFailures < 1) throw new Error("TREND_RANGE_SWITCH_FAILURES must be a positive integer");
+    if (!(cfg.trendRangeRegimeBandLower >= 0 && cfg.trendRangeRegimeBandLower < cfg.trendRangeRegimeBandUpper && cfg.trendRangeRegimeBandUpper <= 1)) throw new Error("Trend-range regime band must satisfy 0 <= lower < upper <= 1");
+    if (!(cfg.trendRangeRegimeMinBandRatio >= 0 && cfg.trendRangeRegimeMinBandRatio <= 1)) throw new Error("TREND_RANGE_REGIME_MIN_BAND_RATIO must be between 0 and 1");
+    if (!Number.isInteger(cfg.trendRangeRegimeMinCrossCount) || cfg.trendRangeRegimeMinCrossCount < 0) throw new Error("TREND_RANGE_REGIME_MIN_CROSS_COUNT must be a non-negative integer");
+    if (cfg.trendRangeRegimeMinPriceRange < 0 || cfg.trendRangeRegimeIgnoreFinalSeconds < 0) throw new Error("Trend-range regime range/time parameters must be >= 0");
+    if (!(cfg.trendRangeRegimeCenterBuffer >= 0 && cfg.trendRangeRegimeCenterBuffer < 0.5)) throw new Error("TREND_RANGE_REGIME_CENTER_BUFFER must be between 0 and 0.5");
+    if (cfg.trendRangeRegimeMinChoppiness < 0) throw new Error("TREND_RANGE_REGIME_MIN_CHOPPINESS must be >= 0");
+    if (!Number.isInteger(cfg.trendRangeRegimeMinSamples) || cfg.trendRangeRegimeMinSamples < 2) throw new Error("TREND_RANGE_REGIME_MIN_SAMPLES must be an integer >= 2");
+    if (!(cfg.trendRangeRegimeRangePrice > 0 && cfg.trendRangeRegimeRangePrice < 0.5)) throw new Error("TREND_RANGE_REGIME_RANGE_PRICE must be between 0 and 0.5");
+    if (cfg.trendRangeRegimeRangeUsdcPerLeg <= 0) throw new Error("TREND_RANGE_REGIME_RANGE_USDC_PER_LEG must be > 0");
+    if (!(cfg.trendRangeOverlayRangeFirstPrice > 0 && cfg.trendRangeOverlayRangeFirstPrice < 0.5)) throw new Error("TREND_RANGE_OVERLAY_RANGE_FIRST_PRICE must be between 0 and 0.5");
+    if (!(cfg.trendRangeOverlayRangeSecondPrice >= cfg.trendRangeOverlayRangeFirstPrice && cfg.trendRangeOverlayRangeFirstPrice + cfg.trendRangeOverlayRangeSecondPrice < 1)) throw new Error("Overlay range prices must satisfy second >= first and first + second < 1");
+    if (cfg.trendRangeOverlayMaxTotalUsdc <= 0) throw new Error("TREND_RANGE_OVERLAY_RANGE_MAX_TOTAL_USDC must be > 0");
+    if (!(cfg.trendRangeOverlayTrendTakeProfitPrice >= 0 && cfg.trendRangeOverlayTrendTakeProfitPrice <= 1)) throw new Error("TREND_RANGE_OVERLAY_TREND_TAKE_PROFIT_PRICE must be between 0 and 1");
+    if (!(cfg.sustainedHighTriggerPrice > 0 && cfg.sustainedHighTriggerPrice < 1)) throw new Error("SUSTAINED_HIGH_TRIGGER_PRICE must be between 0 and 1");
+    if (cfg.sustainedHighConfirmSeconds < 0) throw new Error("SUSTAINED_HIGH_CONFIRM_SECONDS must be >= 0");
+    if (!(cfg.sustainedHighEntryPrice > 0 && cfg.sustainedHighEntryPrice <= cfg.sustainedHighTriggerPrice)) throw new Error("SUSTAINED_HIGH_ENTRY_PRICE must be > 0 and <= trigger price");
+    if (cfg.sustainedHighOrderUsdc <= 0) throw new Error("SUSTAINED_HIGH_ORDER_USDC must be > 0");
+    if (cfg.sustainedHighMaxSecondsLeftToTrigger < 0 || cfg.sustainedHighMinSecondsLeftToTrigger < 0 || cfg.sustainedHighMinSecondsLeftToFill < 0 || cfg.sustainedHighMaxOrderAgeSeconds < 0) throw new Error("Sustained-high time parameters must be >= 0");
+    if (cfg.sustainedHighMinBtcMoveBps < 0 || cfg.sustainedHighMaxBtcReversalBps < 0) throw new Error("Sustained-high BTC parameters must be >= 0");
+    if (!(cfg.latencyScalpMinSignalPrice > 0 && cfg.latencyScalpMinSignalPrice <= cfg.latencyScalpEntryPrice && cfg.latencyScalpTakeProfitPrice > cfg.latencyScalpEntryPrice && cfg.latencyScalpTakeProfitPrice < 1)) throw new Error("Latency-scalp prices must satisfy 0 < signal <= entry < take-profit < 1");
+    if (cfg.latencyScalpOrderUsdc <= 0 || cfg.latencyScalpMaxEntryOrderAgeSeconds <= 0 || cfg.latencyScalpMaxHoldSeconds <= 0) throw new Error("Invalid latency-scalp budget or duration");
+    if (!(cfg.latencyScalpStopLossPrice > 0 && cfg.latencyScalpStopLossPrice < cfg.latencyScalpEntryPrice)) throw new Error("Latency-scalp stop loss must be below entry");
+    if (cfg.latencyScalpTriggerConfirmSeconds < 0 || cfg.latencyScalpSignalLookbackSeconds <= 0 || cfg.latencyScalpMinContractMomentum < 0 || cfg.latencyScalpMinBtcMomentumBps < 0) throw new Error("Invalid latency-scalp signal parameters");
+    if (!(cfg.deepReboundMinEntryPrice > 0 && cfg.deepReboundMinEntryPrice < cfg.deepReboundMaxEntryPrice && cfg.deepReboundMaxEntryPrice < 1)) throw new Error("Invalid deep-rebound entry range");
+    if (cfg.deepReboundOrderUsdc <= 0 || cfg.deepReboundMaxUsdcPerLeg < cfg.deepReboundOrderUsdc || cfg.deepReboundScoreThreshold < 0 || cfg.deepReboundTakeProfitPrice <= 0) throw new Error("Invalid deep-rebound risk parameters");
+    if (!(cfg.extreme020EntryThreshold > 0 && cfg.extreme020EntryThreshold < 1) || cfg.extreme020TakeProfitDelta < 0 || cfg.extreme020EntryThreshold + cfg.extreme020TakeProfitDelta >= 1) throw new Error("Invalid extreme-020-rebound prices");
+    if (cfg.extreme020OrderUsdc <= 0 || cfg.extreme020MinSecondsLeftToOpen < 0 || cfg.extreme020MaxSecondsLeftToOpen <= cfg.extreme020MinSecondsLeftToOpen) throw new Error("Invalid extreme-020-rebound budget or entry window");
+    if (!(cfg.extreme020StopLossPct >= 0 && cfg.extreme020StopLossPct < 1) || cfg.extreme020MaxHoldSeconds < 0 || cfg.extreme020ForceExitSecondsLeft < 0) throw new Error("Invalid extreme-020-rebound exit controls");
+    if (!(cfg.final30HighTriggerPrice > 0.5 && cfg.final30HighTriggerPrice < 1 && cfg.final30HighEarlyTriggerPrice >= cfg.final30HighTriggerPrice && cfg.final30HighEarlyTriggerPrice <= cfg.final30HighMaxEntryPrice && cfg.final30HighMaxEntryPrice < 1) || cfg.final30HighOrderShares <= 0) throw new Error("Invalid final-30-high price or size");
+    if (cfg.final30HighMinSecondsLeftToOpen < 0 || cfg.final30HighMaxSecondsLeftToOpen <= cfg.final30HighMinSecondsLeftToOpen || cfg.final30HighEarlyMaxSecondsLeftToOpen < cfg.final30HighMaxSecondsLeftToOpen) throw new Error("Invalid final-30-high entry window");
     return cfg;
 }
 
@@ -720,6 +917,172 @@ function runAdaptiveEdgeBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycl
     return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
 }
 
+function runDeepReboundBacktest(rows: MarketRow[], cfg: BacktestConfig, logSummary = true): { cycles: CycleState[]; trades: Trade[] } {
+    const cycles = createCycleMap(rows, cfg);
+    const historyByCycle = new Map<string, Btc5mRegimeSnapshot[]>();
+    let signals = 0;
+
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution" || row.btcPrice === undefined || cycle.openPrice === undefined) continue;
+        if (!historyByCycle.has(row.slug)) historyByCycle.set(row.slug, []);
+        const history = historyByCycle.get(row.slug)!;
+        history.push({ t: row.timestampMs, upAsk: row.upAsk, downAsk: row.downAsk, btcPrice: row.btcPrice });
+        const cutoff = row.timestampMs - 60_000;
+        while (history.length > 0 && history[0].t < cutoff) history.shift();
+
+        const decision = buildBtc5mDeepReboundOrders({
+            timestampMs: row.timestampMs,
+            endMs: cycle.endMs,
+            btcPrice: row.btcPrice,
+            openPrice: cycle.openPrice,
+            up: { bestBid: row.upBid, bestAsk: row.upAsk, mid: row.upMid },
+            down: { bestBid: row.downBid, bestAsk: row.downAsk, mid: row.downMid },
+            positions: {
+                UP: { shares: cycle.inventoryUp, cost: cycle.costUp, tookProfit: cycle.tookProfitUp },
+                DOWN: { shares: cycle.inventoryDown, cost: cycle.costDown, tookProfit: cycle.tookProfitDown },
+            },
+            history,
+            params: {
+                intervalMinutes: cfg.intervalMinutes,
+                volPerInterval: cfg.volPerInterval,
+                minEntryPrice: cfg.deepReboundMinEntryPrice,
+                maxEntryPrice: cfg.deepReboundMaxEntryPrice,
+                orderUsdc: cfg.deepReboundOrderUsdc,
+                maxUsdcPerLeg: cfg.deepReboundMaxUsdcPerLeg,
+                scoreThreshold: cfg.deepReboundScoreThreshold,
+                minDiscount: cfg.deepReboundMinDiscount,
+                takeProfitPrice: cfg.deepReboundTakeProfitPrice,
+                stopLossPct: cfg.deepReboundStopLossPct,
+                minSecondsLeftToOpen: cfg.deepReboundMinSecondsLeftToOpen,
+                maxSecondsLeftToOpen: cfg.deepReboundMaxSecondsLeftToOpen,
+                forceExitSecondsLeft: cfg.deepReboundForceExitSecondsLeft,
+            },
+        });
+        if (decision.quotes.some((quote) => quote.side === "BUY")) signals++;
+        applyManagedQuotes(cycle, row, decision.quotes);
+    }
+
+    settleManagedCycles(cycles);
+    if (logSummary) console.log(`Deep-rebound signals: ${signals}`);
+    const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
+function runExtreme020ReboundBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    const cycles = createCycleMap(rows, cfg);
+    const states = new Map<string, Record<Leg, Btc5mExtreme020Position>>();
+    let entries = 0;
+    let takeProfits = 0;
+    let stopLosses = 0;
+    let timeStops = 0;
+    let forceExits = 0;
+
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+        const state = states.get(row.slug) ?? {
+            UP: { shares: 0, cost: 0, entered: false, exited: false },
+            DOWN: { shares: 0, cost: 0, entered: false, exited: false },
+        };
+        state.UP.shares = cycle.inventoryUp;
+        state.UP.cost = cycle.costUp;
+        state.DOWN.shares = cycle.inventoryDown;
+        state.DOWN.cost = cycle.costDown;
+        const decision = buildBtc5mExtreme020ReboundOrders({
+            timestampMs: row.timestampMs,
+            endMs: cycle.endMs,
+            upAsk: row.upAsk,
+            downAsk: row.downAsk,
+            upBid: row.upBid,
+            downBid: row.downBid,
+            positions: state,
+            params: {
+                entryThreshold: cfg.extreme020EntryThreshold,
+                takeProfitDelta: cfg.extreme020TakeProfitDelta,
+                orderUsdc: cfg.extreme020OrderUsdc,
+                minSecondsLeftToOpen: cfg.extreme020MinSecondsLeftToOpen,
+                maxSecondsLeftToOpen: cfg.extreme020MaxSecondsLeftToOpen,
+                stopLossPct: cfg.extreme020StopLossPct,
+                maxHoldSeconds: cfg.extreme020MaxHoldSeconds,
+                forceExitSecondsLeft: cfg.extreme020ForceExitSecondsLeft,
+            },
+        });
+        for (const quote of decision.quotes) {
+            const legState = state[quote.leg];
+            if (quote.side === "BUY" && !legState.entered) {
+                const ask = quote.leg === "UP" ? row.upAsk : row.downAsk;
+                if (ask <= 0 || ask > quote.price) continue;
+                buyAtPrice(cycle, row, quote.leg, ask, ask * quote.size, quote.fair, quote.edge, `${quote.note}; limit=${quote.price.toFixed(2)}`);
+                legState.entered = true;
+                legState.enteredAtMs = row.timestampMs;
+                legState.shares = quote.size;
+                legState.cost = ask * quote.size;
+                entries++;
+            } else if (quote.side === "SELL" && !legState.exited) {
+                const bid = quote.leg === "UP" ? row.upBid : row.downBid;
+                if (bid === undefined || bid < quote.price) continue;
+                sellAtPrice(cycle, row, quote.leg, quote.price, quote.size, quote.fair, quote.edge, quote.note);
+                legState.exited = true;
+                legState.shares = 0;
+                legState.cost = 0;
+                if (quote.note?.includes("take-profit")) takeProfits++;
+                else if (quote.note?.includes("stop-loss")) stopLosses++;
+                else if (quote.note?.includes("time-stop")) timeStops++;
+                else forceExits++;
+            }
+        }
+        states.set(row.slug, state);
+    }
+
+    settleManagedCycles(cycles);
+    console.log(`Extreme-020-rebound: entries=${entries}, takeProfits=${takeProfits}, stopLosses=${stopLosses}, timeStops=${timeStops}, forceExits=${forceExits}, takeProfitRate=${entries ? (takeProfits / entries * 100).toFixed(2) : "0.00"}%`);
+    const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
+function runFinal30HighBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    const cycles = createCycleMap(rows, cfg);
+    const entered = new Set<string>();
+    const blocked = new Set<string>();
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+        const decision = buildBtc5mFinal30HighOrders({
+            timestampMs: row.timestampMs,
+            endMs: cycle.endMs,
+            upAsk: row.upAsk,
+            downAsk: row.downAsk,
+            entered: entered.has(row.slug) || blocked.has(row.slug),
+            params: {
+                triggerPrice: cfg.final30HighTriggerPrice,
+                earlyTriggerPrice: cfg.final30HighEarlyTriggerPrice,
+                maxEntryPrice: cfg.final30HighMaxEntryPrice,
+                orderShares: cfg.final30HighOrderShares,
+                maxSecondsLeftToOpen: cfg.final30HighMaxSecondsLeftToOpen,
+                earlyMaxSecondsLeftToOpen: cfg.final30HighEarlyMaxSecondsLeftToOpen,
+                minSecondsLeftToOpen: cfg.final30HighMinSecondsLeftToOpen,
+            },
+        });
+        if (decision.reason?.includes("blocked:")) blocked.add(row.slug);
+        const quote = decision.quotes[0];
+        if (!quote || quote.side !== "BUY") continue;
+        const ask = quote.leg === "UP" ? row.upAsk : row.downAsk;
+        if (ask <= 0 || ask >= 1 || ask < cfg.final30HighTriggerPrice) continue;
+        buyAtPrice(cycle, row, quote.leg, ask, ask * quote.size, quote.fair, quote.edge, quote.note);
+        entered.add(row.slug);
+    }
+    settleCycles(cycles);
+    const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
+    const traded = cycleList.filter((cycle) => cycle.trades.length > 0);
+    const winners = traded.filter((cycle) => cycle.trades.some((trade) => trade.pnl !== undefined && trade.pnl > 0)).length;
+    console.log(`Final-30-high: entries=${traded.length}, winners=${winners}, winRate=${traded.length ? (winners / traded.length * 100).toFixed(2) : "0.00"}%`);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
 function runRangeArbBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
     const cycles = createCycleMap(rows, cfg);
     for (const row of rows) {
@@ -740,6 +1103,38 @@ function runRangeArbBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: 
     }
     settleCycles(cycles);
     const cycleList = Array.from(cycles.values()).sort((a, b) => a.startMs - b.startMs);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
+function runRangePairBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    const cycles = createCycleMap(rows, cfg);
+    const states = new Map<string, Btc5mRangePairState>();
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+        const secondsLeft = (cycle.endMs - row.timestampMs) / 1000;
+        if (secondsLeft < cfg.minSecondsLeft) continue;
+        const state = states.get(row.slug) ?? { filledUp: false, filledDown: false };
+        const decision = buildBtc5mRangePairOrders(state, {
+            firstPrice: cfg.trendRangeOverlayRangeFirstPrice,
+            secondPrice: cfg.trendRangeOverlayRangeSecondPrice,
+            maxTotalUsdc: cfg.trendRangeOverlayMaxTotalUsdc,
+        });
+        const filledLegs: Leg[] = [];
+        for (const quote of decision.quotes) {
+            const ask = quote.leg === "UP" ? row.upAsk : row.downAsk;
+            if (ask > quote.price) continue;
+            buyAtPrice(cycle, row, quote.leg, quote.price, quote.price * quote.size, quote.fair, quote.edge, `range-pair ${cfg.trendRangeOverlayRangeFirstPrice.toFixed(2)}->${cfg.trendRangeOverlayRangeSecondPrice.toFixed(2)}`);
+            filledLegs.push(quote.leg);
+            if (quote.leg === "UP") state.filledUp = true;
+            else state.filledDown = true;
+        }
+        if (!state.firstLeg && filledLegs.length === 1) state.firstLeg = filledLegs[0];
+        states.set(row.slug, state);
+    }
+    settleCycles(cycles);
+    const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
     return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
 }
 
@@ -852,6 +1247,130 @@ function runTrendPullbackBacktest(rows: MarketRow[], cfg: BacktestConfig, logSta
     return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
 }
 
+function runSustainedHighBacktest(rows: MarketRow[], cfg: BacktestConfig, logSummary = true): { cycles: CycleState[]; trades: Trade[] } {
+    const cycles = createCycleMap(rows, cfg);
+    const states = new Map<string, Btc5mSustainedHighState>();
+    let triggeredCycles = 0;
+    let filledCycles = 0;
+    let cancelledCycles = 0;
+
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+
+        const previousState = states.get(row.slug) ?? {};
+        const decision = buildBtc5mSustainedHighOrders({
+            timestampMs: row.timestampMs,
+            endMs: cycle.endMs,
+            upAsk: row.upAsk,
+            downAsk: row.downAsk,
+            btcPrice: row.btcPrice,
+            openPrice: row.openPrice ?? cycle.openPrice,
+            state: previousState,
+            params: {
+                triggerPrice: cfg.sustainedHighTriggerPrice,
+                confirmSeconds: cfg.sustainedHighConfirmSeconds,
+                entryPrice: cfg.sustainedHighEntryPrice,
+                orderUsdc: cfg.sustainedHighOrderUsdc,
+                maxSecondsLeftToTrigger: cfg.sustainedHighMaxSecondsLeftToTrigger,
+                minSecondsLeftToTrigger: cfg.sustainedHighMinSecondsLeftToTrigger,
+                minSecondsLeftToFill: cfg.sustainedHighMinSecondsLeftToFill,
+                maxOrderAgeSeconds: cfg.sustainedHighMaxOrderAgeSeconds,
+                minBtcMoveBps: cfg.sustainedHighMinBtcMoveBps,
+                maxBtcReversalBps: cfg.sustainedHighMaxBtcReversalBps,
+            },
+        });
+        if (!previousState.triggeredLeg && decision.state.triggeredLeg) triggeredCycles++;
+        if (!previousState.cancelled && decision.state.cancelled) cancelledCycles++;
+
+        const quote = decision.quotes[0];
+        const ask = quote?.leg === "UP" ? row.upAsk : row.downAsk;
+        if (quote?.side === "BUY" && ask > 0 && ask <= quote.price) {
+            buyAtPrice(cycle, row, quote.leg, quote.price, quote.price * quote.size, quote.fair, quote.edge, quote.note);
+            decision.state = { ...decision.state, filled: true };
+            filledCycles++;
+        }
+        states.set(row.slug, decision.state);
+    }
+
+    settleSustainedHighCycles(cycles);
+    if (logSummary) console.log(`Sustained-high orders: triggered=${triggeredCycles}, filled=${filledCycles}, cancelled=${cancelledCycles}, fill rate=${triggeredCycles ? (filledCycles / triggeredCycles * 100).toFixed(2) : "0.00"}%`);
+    const cycleList = Array.from(cycles.values()).sort((a, b) => a.startMs - b.startMs);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
+function runLatencyScalpBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    const cycles = createCycleMap(rows, cfg);
+    const states = new Map<string, Btc5mLatencyScalpState>();
+    let triggered = 0;
+    let filled = 0;
+    let takeProfits = 0;
+    let riskExits = 0;
+
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+        const previousState = states.get(row.slug) ?? {};
+        const decision = buildBtc5mLatencyScalpOrders({
+            timestampMs: row.timestampMs,
+            endMs: cycle.endMs,
+            upAsk: row.upAsk,
+            downAsk: row.downAsk,
+            upBid: row.upBid,
+            downBid: row.downBid,
+            btcPrice: row.btcPrice,
+            openPrice: row.openPrice ?? cycle.openPrice,
+            state: previousState,
+            params: {
+                minSignalPrice: cfg.latencyScalpMinSignalPrice,
+                triggerConfirmSeconds: cfg.latencyScalpTriggerConfirmSeconds,
+                signalLookbackSeconds: cfg.latencyScalpSignalLookbackSeconds,
+                minContractMomentum: cfg.latencyScalpMinContractMomentum,
+                minBtcMomentumBps: cfg.latencyScalpMinBtcMomentumBps,
+                entryPrice: cfg.latencyScalpEntryPrice,
+                takeProfitPrice: cfg.latencyScalpTakeProfitPrice,
+                orderUsdc: cfg.latencyScalpOrderUsdc,
+                maxSecondsLeftToTrigger: cfg.latencyScalpMaxSecondsLeftToTrigger,
+                minSecondsLeftToTrigger: cfg.latencyScalpMinSecondsLeftToTrigger,
+                maxEntryOrderAgeSeconds: cfg.latencyScalpMaxEntryOrderAgeSeconds,
+                maxHoldSeconds: cfg.latencyScalpMaxHoldSeconds,
+                minBtcMoveBps: cfg.latencyScalpMinBtcMoveBps,
+                maxBtcReversalBps: cfg.latencyScalpMaxBtcReversalBps,
+                stopLossPrice: cfg.latencyScalpStopLossPrice,
+                forceExitSecondsLeft: cfg.latencyScalpForceExitSecondsLeft,
+            },
+        });
+        let nextState = decision.state;
+        if (!previousState.triggeredLeg && nextState.triggeredLeg) triggered++;
+        const quote = decision.quotes[0];
+        if (quote?.side === "BUY" && !nextState.filled) {
+            const ask = quote.leg === "UP" ? row.upAsk : row.downAsk;
+            if (ask > 0 && ask <= quote.price && row.timestampMs > (nextState.triggeredAtMs ?? row.timestampMs)) {
+                buyAtPrice(cycle, row, quote.leg, ask, ask * quote.size, quote.fair, quote.edge, `${quote.note}; limit=${quote.price.toFixed(2)}`);
+                nextState = { ...nextState, filled: true, filledAtMs: row.timestampMs, fillBtcPrice: row.btcPrice, filledShares: quote.size };
+                filled++;
+            }
+        } else if (quote?.side === "SELL" && nextState.filled && !nextState.exited) {
+            const bid = quote.leg === "UP" ? row.upBid : row.downBid;
+            const isTakeProfit = quote.note?.includes("take profit") ?? false;
+            if (bid !== undefined && bid > 0 && (!isTakeProfit || bid >= quote.price)) {
+                sellAtPrice(cycle, row, quote.leg, isTakeProfit ? quote.price : bid, quote.size, quote.fair, quote.edge, quote.note);
+                nextState = { ...nextState, exited: true };
+                if (isTakeProfit) takeProfits++;
+                else riskExits++;
+            }
+        }
+        states.set(row.slug, nextState);
+    }
+
+    settleManagedCycles(cycles);
+    console.log(`Latency-scalp orders: triggered=${triggered}, filled=${filled}, takeProfits=${takeProfits}, riskExits=${riskExits}, fillRate=${triggered ? (filled / triggered * 100).toFixed(2) : "0.00"}%`);
+    const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
 function runTrendRangeSwitchBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
     type Mode = "trend-pullback" | "range-arb";
     const rowsBySlug = new Map<string, MarketRow[]>();
@@ -868,7 +1387,6 @@ function runTrendRangeSwitchBacktest(rows: MarketRow[], cfg: BacktestConfig): { 
         "trend-pullback": { cycles: 0, traded: 0, failures: 0, pnl: 0 },
         "range-arb": { cycles: 0, traded: 0, failures: 0, pnl: 0 },
     };
-
     for (const rowsForCycle of cycleRows) {
         const activeMode = mode;
         const result = activeMode === "trend-pullback"
@@ -906,6 +1424,212 @@ function runTrendRangeSwitchBacktest(rows: MarketRow[], cfg: BacktestConfig): { 
     return { cycles, trades: cycles.flatMap((cycle) => cycle.trades) };
 }
 
+function runTrendRangeRegimeBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    type Mode = "trend-pullback" | "range-arb";
+    const rowsBySlug = new Map<string, MarketRow[]>();
+    for (const row of rows) {
+        if (!rowsBySlug.has(row.slug)) rowsBySlug.set(row.slug, []);
+        rowsBySlug.get(row.slug)!.push(row);
+    }
+    const cycleRows = Array.from(rowsBySlug.values())
+        .map((rowsForCycle) => rowsForCycle.sort((left, right) => left.timestampMs - right.timestampMs))
+        .sort((left, right) => left[0].timestampMs - right[0].timestampMs);
+    const cycles: CycleState[] = [];
+    let nextMode: Mode = "trend-pullback";
+    let rangeSignals = 0;
+    const modeStats = {
+        "trend-pullback": { cycles: 0, traded: 0, profitable: 0, pnl: 0 },
+        "range-arb": { cycles: 0, traded: 0, profitable: 0, pnl: 0 },
+    };
+    const regimeRangeConfig = {
+        ...cfg,
+        rangePriceX: cfg.trendRangeRegimeRangePrice,
+        rangeUsdcPerLeg: cfg.trendRangeRegimeRangeUsdcPerLeg,
+    };
+
+    for (const rowsForCycle of cycleRows) {
+        const activeMode = nextMode;
+        const result = activeMode === "range-arb"
+            ? runRangeArbBacktest(rowsForCycle, regimeRangeConfig)
+            : runTrendPullbackBacktest(rowsForCycle, cfg, false);
+        const cycle = result.cycles[0];
+        if (!cycle) continue;
+        const cost = cycle.trades.reduce((sum, trade) => sum + trade.cost, 0);
+        const payout = cycle.trades.reduce((sum, trade) => sum + (trade.payout ?? 0), 0);
+        const pnl = payout - cost;
+        modeStats[activeMode].cycles++;
+        modeStats[activeMode].pnl += pnl;
+        if (cost > 0) {
+            modeStats[activeMode].traded++;
+            if (pnl > 0) modeStats[activeMode].profitable++;
+        }
+        for (const trade of cycle.trades) trade.note = `trend-range-regime mode=${activeMode}; ${trade.note ?? ""}`.trim();
+        cycles.push(cycle);
+
+        const metrics = classifyTrendRangeCycle(rowsForCycle, cycle, cfg);
+        nextMode = metrics.oscillating ? "range-arb" : "trend-pullback";
+        if (metrics.oscillating) rangeSignals++;
+    }
+
+    console.log(`Trend-range regime: rangeSignals=${rangeSignals}, band=${cfg.trendRangeRegimeBandLower.toFixed(2)}-${cfg.trendRangeRegimeBandUpper.toFixed(2)}, minBandRatio=${cfg.trendRangeRegimeMinBandRatio.toFixed(2)}, centerBuffer=${cfg.trendRangeRegimeCenterBuffer.toFixed(2)}, minSwings=${cfg.trendRangeRegimeMinCrossCount}, minRange=${cfg.trendRangeRegimeMinPriceRange.toFixed(2)}, minChoppiness=${cfg.trendRangeRegimeMinChoppiness.toFixed(2)}, ignoreFinalSeconds=${cfg.trendRangeRegimeIgnoreFinalSeconds}`);
+    console.log(`  trend-pullback: cycles=${modeStats["trend-pullback"].cycles}, traded=${modeStats["trend-pullback"].traded}, profitable=${modeStats["trend-pullback"].profitable}, pnl=${modeStats["trend-pullback"].pnl.toFixed(4)}`);
+    console.log(`  range-arb@${cfg.trendRangeRegimeRangePrice.toFixed(2)} (${cfg.trendRangeRegimeRangeUsdcPerLeg.toFixed(2)} USDC/leg): cycles=${modeStats["range-arb"].cycles}, traded=${modeStats["range-arb"].traded}, profitable=${modeStats["range-arb"].profitable}, pnl=${modeStats["range-arb"].pnl.toFixed(4)}`);
+    return { cycles, trades: cycles.flatMap((cycle) => cycle.trades) };
+}
+
+function runTrendRangeOverlayBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    const rowsBySlug = new Map<string, MarketRow[]>();
+    for (const row of rows) {
+        if (!rowsBySlug.has(row.slug)) rowsBySlug.set(row.slug, []);
+        rowsBySlug.get(row.slug)!.push(row);
+    }
+    const cycleRows = Array.from(rowsBySlug.values())
+        .map((rowsForCycle) => rowsForCycle.sort((left, right) => left.timestampMs - right.timestampMs))
+        .sort((left, right) => left[0].timestampMs - right[0].timestampMs);
+    const cycles: CycleState[] = [];
+    let previousMetrics: ReturnType<typeof classifyPreviousCycleRegime> | undefined;
+    let rangeSignals = 0;
+    const componentStats = {
+        trend: { traded: 0, profitable: 0, pnl: 0 },
+        range: { traded: 0, profitable: 0, pnl: 0 },
+        high: { traded: 0, profitable: 0, pnl: 0 },
+    };
+
+    for (const rowsForCycle of cycleRows) {
+        const trendConfig = previousMetrics?.oscillating && cfg.trendRangeOverlayTrendTakeProfitPrice > 0
+            ? { ...cfg, trendPullbackPostFillTakeProfitPrice: cfg.trendRangeOverlayTrendTakeProfitPrice }
+            : cfg;
+        const trendResult = runTrendPullbackBacktest(rowsForCycle, trendConfig, false);
+        const cycle = trendResult.cycles[0];
+        if (!cycle) continue;
+        const trendTotals = cycleTradeTotals(cycle);
+        if (trendTotals.cost > 0) {
+            componentStats.trend.traded++;
+            if (trendTotals.pnl > 0) componentStats.trend.profitable++;
+        }
+        componentStats.trend.pnl += trendTotals.pnl;
+        for (const trade of cycle.trades) trade.note = `trend-range-overlay component=trend; ${trade.note ?? ""}`.trim();
+
+        if (!previousMetrics?.oscillating && trendTotals.cost <= 0) {
+            const highResult = runSustainedHighBacktest(rowsForCycle, cfg, false);
+            const highCycle = highResult.cycles[0];
+            if (highCycle) {
+                const highTotals = cycleTradeTotals(highCycle);
+                if (highTotals.cost > 0) {
+                    componentStats.high.traded++;
+                    if (highTotals.pnl > 0) componentStats.high.profitable++;
+                }
+                componentStats.high.pnl += highTotals.pnl;
+                for (const trade of highCycle.trades) {
+                    trade.note = `trend-range-overlay component=sustained-high fallback; ${trade.note ?? ""}`.trim();
+                    cycle.trades.push(trade);
+                }
+            }
+        }
+
+        if (previousMetrics?.oscillating) {
+            const rangeResult = runRangePairBacktest(rowsForCycle, cfg);
+            const rangeCycle = rangeResult.cycles[0];
+            if (rangeCycle) {
+                const rangeTotals = cycleTradeTotals(rangeCycle);
+                if (rangeTotals.cost > 0) {
+                    componentStats.range.traded++;
+                    if (rangeTotals.pnl > 0) componentStats.range.profitable++;
+                }
+                componentStats.range.pnl += rangeTotals.pnl;
+                const signal = `band=${previousMetrics.bandRatio.toFixed(2)} swings=${previousMetrics.crossCount} range=${previousMetrics.priceRange.toFixed(2)} chop=${previousMetrics.choppiness.toFixed(2)}`;
+                for (const trade of rangeCycle.trades) {
+                    trade.note = `trend-range-overlay component=range previous=${signal}; ${trade.note ?? ""}`.trim();
+                    cycle.trades.push(trade);
+                }
+            }
+        }
+        cycles.push(cycle);
+        previousMetrics = classifyTrendRangeCycle(rowsForCycle, cycle, cfg);
+        if (previousMetrics.oscillating) rangeSignals++;
+    }
+
+    console.log(`Trend-range overlay: rangeSignals=${rangeSignals}, trendAlwaysOn=true, sustainedHighFallback=non-range/no-trend-fill, rangePair=${cfg.trendRangeOverlayRangeFirstPrice.toFixed(2)}->${cfg.trendRangeOverlayRangeSecondPrice.toFixed(2)}, rangeMaxTotalUsdc=${cfg.trendRangeOverlayMaxTotalUsdc.toFixed(2)}, conditionalTrendTakeProfit=${cfg.trendRangeOverlayTrendTakeProfitPrice.toFixed(2)}`);
+    console.log(`  trend-pullback: traded=${componentStats.trend.traded}, profitable=${componentStats.trend.profitable}, pnl=${componentStats.trend.pnl.toFixed(4)}`);
+    console.log(`  sustained-high fallback: traded=${componentStats.high.traded}, profitable=${componentStats.high.profitable}, pnl=${componentStats.high.pnl.toFixed(4)}`);
+    console.log(`  conditional range-arb: traded=${componentStats.range.traded}, profitable=${componentStats.range.profitable}, pnl=${componentStats.range.pnl.toFixed(4)}`);
+    return { cycles, trades: cycles.flatMap((cycle) => cycle.trades) };
+}
+
+function runAdaptiveOverlayBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    const rowsBySlug = new Map<string, MarketRow[]>();
+    for (const row of rows) {
+        if (!rowsBySlug.has(row.slug)) rowsBySlug.set(row.slug, []);
+        rowsBySlug.get(row.slug)!.push(row);
+    }
+    const cycleRows = Array.from(rowsBySlug.values())
+        .map((items) => items.sort((left, right) => left.timestampMs - right.timestampMs))
+        .sort((left, right) => left[0].timestampMs - right[0].timestampMs);
+    const deepRows: MarketRow[] = [];
+    let previousMetrics: ReturnType<typeof classifyPreviousCycleRegime> | undefined;
+    let enabledCycles = 0;
+    for (const rowsForCycle of cycleRows) {
+        const deepEnabled = cfg.adaptiveOverlayDeepInRange || !previousMetrics?.oscillating;
+        if (deepEnabled) {
+            deepRows.push(...rowsForCycle);
+            enabledCycles++;
+        }
+        const cycle = createCycleMap(rowsForCycle, cfg).get(rowsForCycle[0].slug)!;
+        previousMetrics = classifyTrendRangeCycle(rowsForCycle, cycle, cfg);
+    }
+
+    const overlay = runTrendRangeOverlayBacktest(rows, cfg);
+    const deep = runDeepReboundBacktest(deepRows, cfg, false);
+    const overlayBySlug = new Map(overlay.cycles.map((cycle) => [cycle.slug, cycle]));
+    let deepTraded = 0;
+    let deepProfitable = 0;
+    let deepPnl = 0;
+    for (const deepCycle of deep.cycles) {
+        const target = overlayBySlug.get(deepCycle.slug);
+        if (!target) continue;
+        const totals = cycleTradeTotals(deepCycle);
+        if (totals.cost > 0) {
+            deepTraded++;
+            if (totals.pnl > 0) deepProfitable++;
+        }
+        deepPnl += totals.pnl;
+        for (const trade of deepCycle.trades) {
+            trade.note = `adaptive-overlay component=deep-rebound; ${trade.note ?? ""}`.trim();
+            target.trades.push(trade);
+        }
+    }
+    console.log(`Adaptive overlay: deepEnabledCycles=${enabledCycles}, deepInRange=${cfg.adaptiveOverlayDeepInRange}, deepTraded=${deepTraded}, deepProfitable=${deepProfitable}, deepPnl=${deepPnl.toFixed(4)}`);
+    return { cycles: overlay.cycles, trades: overlay.cycles.flatMap((cycle) => cycle.trades) };
+}
+
+function classifyTrendRangeCycle(rows: MarketRow[], cycle: CycleState, cfg: BacktestConfig): ReturnType<typeof classifyPreviousCycleRegime> {
+    return classifyPreviousCycleRegime(rows.flatMap((row) => {
+        if (row.rowType === "resolution") return [];
+        const upMid = row.upMid ?? (row.upBid !== undefined ? (row.upBid + row.upAsk) / 2 : row.upAsk);
+        return [{
+            timestampMs: row.timestampMs,
+            secondsLeft: Math.max(0, (cycle.endMs - row.timestampMs) / 1000),
+            upMid,
+        }];
+    }), {
+        bandLower: cfg.trendRangeRegimeBandLower,
+        bandUpper: cfg.trendRangeRegimeBandUpper,
+        minBandRatio: cfg.trendRangeRegimeMinBandRatio,
+        minCrossCount: cfg.trendRangeRegimeMinCrossCount,
+        minPriceRange: cfg.trendRangeRegimeMinPriceRange,
+        centerBuffer: cfg.trendRangeRegimeCenterBuffer,
+        minChoppiness: cfg.trendRangeRegimeMinChoppiness,
+        ignoreFinalSeconds: cfg.trendRangeRegimeIgnoreFinalSeconds,
+        minSamples: cfg.trendRangeRegimeMinSamples,
+    });
+}
+
+function cycleTradeTotals(cycle: CycleState): { cost: number; payout: number; pnl: number } {
+    const cost = cycle.trades.reduce((sum, trade) => sum + trade.cost, 0);
+    const payout = cycle.trades.reduce((sum, trade) => sum + (trade.payout ?? 0), 0);
+    return { cost, payout, pnl: payout - cost };
+}
+
 function settleTrendPullbackCycles(cycles: Map<string, CycleState>): void {
     for (const cycle of cycles.values()) {
         const winner = inferWinner(cycle);
@@ -922,6 +1646,28 @@ function settleTrendPullbackCycles(cycles: Map<string, CycleState>): void {
                 payout: shares,
                 pnl: shares,
                 note: "trend-pullback settlement",
+            });
+        }
+        for (const trade of cycle.trades) trade.finalPrice = trade.finalPrice ?? cycle.finalPrice;
+    }
+}
+
+function settleSustainedHighCycles(cycles: Map<string, CycleState>): void {
+    for (const cycle of cycles.values()) {
+        const winner = inferWinner(cycle);
+        const shares = winner === "UP" ? cycle.inventoryUp : winner === "DOWN" ? cycle.inventoryDown : 0;
+        if (winner && shares > 0) {
+            cycle.trades.push({
+                slug: cycle.slug,
+                timestampMs: cycle.endMs,
+                leg: winner,
+                price: 1,
+                shares,
+                cost: 0,
+                finalPrice: cycle.finalPrice,
+                payout: shares,
+                pnl: shares,
+                note: "sustained-high settlement",
             });
         }
         for (const trade of cycle.trades) trade.finalPrice = trade.finalPrice ?? cycle.finalPrice;
@@ -1068,7 +1814,7 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
     console.log(`Strategy: ${cfg.strategy}`);
     console.log(`CSV: ${cfg.csvPath}`);
     console.log(`Cycles: ${cycles.length}, traded cycles: ${tradedCycles}`);
-    if (cfg.strategy === "trend-pullback" || cfg.strategy === "trend-range-switch") {
+    if (cfg.strategy === "trend-pullback" || cfg.strategy === "sustained-high" || cfg.strategy === "latency-scalp" || cfg.strategy === "deep-rebound" || cfg.strategy === "extreme-020-rebound" || cfg.strategy === "final-30-high" || cfg.strategy === "trend-range-switch" || cfg.strategy === "trend-range-regime" || cfg.strategy === "trend-range-overlay" || cfg.strategy === "adaptive-overlay") {
         const entries = trades.filter((trade) => trade.cost > 0);
         const profitableCycles = cycles.filter((cycle) => {
             const cost = cycle.trades.reduce((sum, trade) => sum + trade.cost, 0);
@@ -1082,8 +1828,24 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
     console.log(`Cost: ${totalCost.toFixed(4)}, payout: ${totalPayout.toFixed(4)}, PnL: ${totalPnl.toFixed(4)}, ROI: ${(roi * 100).toFixed(2)}%`);
     if (cfg.strategy === "trend-pullback") {
         console.log(`Params: trigger=${cfg.trendPullbackTriggerPrice}, entry=${cfg.trendPullbackEntryPrice}, orderUsdc=${cfg.trendPullbackOrderUsdc}, minSecondsLeftToFill=${cfg.trendPullbackMinSecondsLeftToFill}, confirmSeconds=${cfg.trendPullbackTriggerConfirmSeconds}, maxOrderAgeSeconds=${cfg.trendPullbackMaxOrderAgeSeconds}, maxBtcReversalBps=${cfg.trendPullbackMaxBtcReversalBps}`);
+    } else if (cfg.strategy === "sustained-high") {
+        console.log(`Params: trigger=${cfg.sustainedHighTriggerPrice}, confirmSeconds=${cfg.sustainedHighConfirmSeconds}, entry=${cfg.sustainedHighEntryPrice}, orderUsdc=${cfg.sustainedHighOrderUsdc}, maxSecondsLeftToTrigger=${cfg.sustainedHighMaxSecondsLeftToTrigger}, minSecondsLeftToTrigger=${cfg.sustainedHighMinSecondsLeftToTrigger}, minSecondsLeftToFill=${cfg.sustainedHighMinSecondsLeftToFill}, maxOrderAgeSeconds=${cfg.sustainedHighMaxOrderAgeSeconds}, minBtcMoveBps=${cfg.sustainedHighMinBtcMoveBps}, maxBtcReversalBps=${cfg.sustainedHighMaxBtcReversalBps}`);
+    } else if (cfg.strategy === "latency-scalp") {
+        console.log(`Params: signalRange=${cfg.latencyScalpMinSignalPrice}-${cfg.latencyScalpEntryPrice}, confirmSeconds=${cfg.latencyScalpTriggerConfirmSeconds}, entry=${cfg.latencyScalpEntryPrice}, takeProfit=${cfg.latencyScalpTakeProfitPrice}, orderUsdc=${cfg.latencyScalpOrderUsdc}, entryAge=${cfg.latencyScalpMaxEntryOrderAgeSeconds}s, maxHold=${cfg.latencyScalpMaxHoldSeconds}s, minBtcMove=${cfg.latencyScalpMinBtcMoveBps}bps, reversal=${cfg.latencyScalpMaxBtcReversalBps}bps, stopLoss=${cfg.latencyScalpStopLossPrice}`);
+    } else if (cfg.strategy === "deep-rebound") {
+        console.log(`Params: entry=${cfg.deepReboundMinEntryPrice}-${cfg.deepReboundMaxEntryPrice}, score=${cfg.deepReboundScoreThreshold}, minDiscount=${cfg.deepReboundMinDiscount}, takeProfitDelta=${cfg.deepReboundTakeProfitPrice}, orderUsdc=${cfg.deepReboundOrderUsdc}, maxUsdcPerLeg=${cfg.deepReboundMaxUsdcPerLeg}, stopLossPct=${cfg.deepReboundStopLossPct}`);
+    } else if (cfg.strategy === "extreme-020-rebound") {
+        console.log(`Params: entryAsk<=${cfg.extreme020EntryThreshold}, takeProfitDelta=${cfg.extreme020TakeProfitDelta}, orderUsdc=${cfg.extreme020OrderUsdc}, secondsLeft=${cfg.extreme020MinSecondsLeftToOpen}-${cfg.extreme020MaxSecondsLeftToOpen}, stopLossPct=${cfg.extreme020StopLossPct}, maxHold=${cfg.extreme020MaxHoldSeconds}s, forceExit=${cfg.extreme020ForceExitSecondsLeft}s`);
+    } else if (cfg.strategy === "final-30-high") {
+        console.log(`Params: ask>=${cfg.final30HighTriggerPrice} in final ${cfg.final30HighMaxSecondsLeftToOpen}s, ask>=${cfg.final30HighEarlyTriggerPrice} until ${cfg.final30HighEarlyMaxSecondsLeftToOpen}s, maxEntry=${cfg.final30HighMaxEntryPrice}, shares=${cfg.final30HighOrderShares}`);
     } else if (cfg.strategy === "trend-range-switch") {
         console.log(`Params: switchFailures=${cfg.trendRangeSwitchFailures}, rangePrice=${cfg.rangePriceX}, trendTrigger=${cfg.trendPullbackTriggerPrice}, trendEntry=${cfg.trendPullbackEntryPrice}, trendMaxOrderAgeSeconds=${cfg.trendPullbackMaxOrderAgeSeconds}`);
+    } else if (cfg.strategy === "trend-range-regime") {
+        console.log(`Params: previousBand=${cfg.trendRangeRegimeBandLower}-${cfg.trendRangeRegimeBandUpper}, minBandRatio=${cfg.trendRangeRegimeMinBandRatio}, minCrosses=${cfg.trendRangeRegimeMinCrossCount}, rangePrice=${cfg.trendRangeRegimeRangePrice}, rangeUsdcPerLeg=${cfg.trendRangeRegimeRangeUsdcPerLeg}, trendMaxOrderAgeSeconds=${cfg.trendPullbackMaxOrderAgeSeconds}`);
+    } else if (cfg.strategy === "trend-range-overlay") {
+        console.log(`Params: trendAlwaysOn=true, previousBand=${cfg.trendRangeRegimeBandLower}-${cfg.trendRangeRegimeBandUpper}, minBandRatio=${cfg.trendRangeRegimeMinBandRatio}, minCrosses=${cfg.trendRangeRegimeMinCrossCount}, rangePair=${cfg.trendRangeOverlayRangeFirstPrice}->${cfg.trendRangeOverlayRangeSecondPrice}, rangeMaxTotalUsdc=${cfg.trendRangeOverlayMaxTotalUsdc}, conditionalTrendTakeProfit=${cfg.trendRangeOverlayTrendTakeProfitPrice}`);
+    } else if (cfg.strategy === "adaptive-overlay") {
+        console.log(`Params: trend+range+high+deep, deepInRange=${cfg.adaptiveOverlayDeepInRange}, deepEntry=${cfg.deepReboundMinEntryPrice}-${cfg.deepReboundMaxEntryPrice}, deepScore=${cfg.deepReboundScoreThreshold}, deepTakeProfitDelta=${cfg.deepReboundTakeProfitPrice}`);
     } else {
         console.log(`Params: minEdge=${cfg.minEdge}, orderUsdc=${cfg.orderUsdc}, maxUsdcPerLeg=${cfg.maxUsdcPerLeg}, volPerInterval=${cfg.volPerInterval}`);
     }
@@ -1194,8 +1956,24 @@ function runStrategy(cfg: BacktestConfig, records: Record<string, string>[]): { 
             return runAdaptiveEdgeBacktest(rows, cfg);
         case "trend-pullback":
             return runTrendPullbackBacktest(rows, cfg);
+        case "sustained-high":
+            return runSustainedHighBacktest(rows, cfg);
+        case "latency-scalp":
+            return runLatencyScalpBacktest(rows, cfg);
+        case "deep-rebound":
+            return runDeepReboundBacktest(rows, cfg);
+        case "extreme-020-rebound":
+            return runExtreme020ReboundBacktest(rows, cfg);
+        case "final-30-high":
+            return runFinal30HighBacktest(rows, cfg);
         case "trend-range-switch":
             return runTrendRangeSwitchBacktest(rows, cfg);
+        case "trend-range-regime":
+            return runTrendRangeRegimeBacktest(rows, cfg);
+        case "trend-range-overlay":
+            return runTrendRangeOverlayBacktest(rows, cfg);
+        case "adaptive-overlay":
+            return runAdaptiveOverlayBacktest(rows, cfg);
         default:
             throw new Error(`Unsupported strategy: ${cfg.strategy}`);
     }

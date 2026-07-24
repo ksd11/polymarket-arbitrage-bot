@@ -183,11 +183,138 @@ The live recorder also writes `resolution` rows with the winning outcome, payout
 - `managed-edge` or `btc5m:managed-edge` — Edge strategy with entry windows, cheap-late-buy filter, take-profit, stop-loss, and force-exit logic.
 - `adaptive-edge` or `btc5m:adaptive-edge` — Backtest-only regime strategy that switches between trending edge, oscillating scalp, and panic-discount entries.
 - `trend-pullback` or `btc5m:trend-pullback` — Backtests a strong-trend trigger followed by a lower persistent BUY limit; `npm run btc5m:trend-pullback` runs it live or in dry-run mode.
+- `sustained-high` or `btc5m:sustained-high` — Backtests a leg staying at or above `0.90` for 10 seconds, with BTC moving at least 3 bps in the same direction, followed by a guarded `0.90` BUY limit.
+- `latency-scalp` or `btc5m:latency-scalp` — Buys an upward-moving, BTC-aligned leg with a `0.75` maximum limit and immediately rests a `0.80` take-profit sell. `npm run btc5m:latency-scalp` runs it live or in dry-run mode.
+- `deep-rebound` or `btc5m:deep-rebound` — Independently scores contracts priced at `0.03–0.10`, invests at most `1.01 USDC` per leg, and immediately rests a sell `0.05` above the average fill. `npm run btc5m:deep-rebound` runs it live or in dry-run mode.
 - `trend-range-switch` or `btc5m:trend-range-switch` — Starts in trend-pullback, switches to range-arb after consecutive losing traded cycles, and switches back using the same rule. Configure the threshold with `TREND_RANGE_SWITCH_FAILURES`.
+- `trend-range-regime` or `btc5m:trend-range-regime` — Uses only the previous completed cycle to select the next cycle: a confirmed oscillating cycle selects range-arb, otherwise it selects trend-pullback. This is currently a backtest strategy.
+- `trend-range-overlay` or `btc5m:trend-range-overlay` — Runs trend-pullback every cycle, adds range-arb after an oscillating cycle, and uses sustained-high as a non-range fallback after the pullback order expires unfilled. `npm run btc5m:trend-range-overlay` runs it live or in dry-run mode.
+- `adaptive-overlay` or `btc5m:adaptive-overlay` — Extends trend-range-overlay with an independent deep-rebound sleeve on both legs. It targets `0.03–0.10` contracts, limits each leg to `1.01 USDC`, and rests an absolute `+0.05` take-profit. `npm run btc5m:adaptive-overlay` runs it live or in dry-run mode.
+- `extreme-020-rebound` or `btc5m:extreme-020-rebound` — During the part of a 5-minute cycle with at least 120 seconds remaining, buys a leg when its ask reaches the configurable extreme-price threshold. The optimized default is `0.18` with no take-profit, so every fill settles normally; each leg can enter once.
+- `final-30-high` or `btc5m:final-30-high` — In the final 30 seconds, buys five shares only when Ask is between `0.85` and `0.90`, then holds to settlement. Markets already above `0.90` are skipped for that cycle. The cost is approximately `4.25–4.50 USDC` per fill.
 
 ```bash
 npm run backtest:btc5m -- --strategy btc5m:trend-range-switch --switch-failures 2 --range-price-x 0.40 --csv data/btc5m-history-8.csv
 ```
+
+```bash
+npm run backtest:btc5m -- --strategy btc5m:sustained-high --csv data/btc5m-history-8.csv
+```
+
+```bash
+npm run backtest:btc5m -- --strategy btc5m:latency-scalp --csv data/btc5m-history-8.csv
+```
+
+Dry-run the latency strategy before enabling real orders:
+
+```bash
+RUN_ID=$(date +%Y%m%d-%H%M%S)
+LATENCY_SCALP_DRY_RUN=true \
+LATENCY_SCALP_RECORD_FILE="data/latency-scalp-$RUN_ID.csv" \
+LOG_FILE_PATH="logs/latency-scalp-$RUN_ID.log" \
+npm run btc5m:latency-scalp
+```
+
+The strategy evaluates every 100ms but records market decisions once per second. A buy signal requires the selected contract to move at least `0.03` within a five-second window while BTC is aligned. The `0.75` BUY is a maximum price, so a marketable limit can execute at a lower ask. After a fill, the runner immediately posts a `0.80` GTC sell and replaces it with a risk exit after a BTC reversal, `0.70` stop, 30-second hold timeout, or near settlement.
+
+Backtest and dry-run the independent deep-rebound strategy:
+
+```bash
+npm run backtest:btc5m -- --strategy btc5m:deep-rebound --csv data/btc5m-history-8.csv
+
+RUN_ID=$(date +%Y%m%d-%H%M%S)
+DEEP_REBOUND_DRY_RUN=true \
+DEEP_REBOUND_RECORD_FILE="data/deep-rebound-$RUN_ID.csv" \
+LOG_FILE_PATH="logs/deep-rebound-$RUN_ID.log" \
+npm run btc5m:deep-rebound
+```
+
+Deep-rebound does not buy solely because a contract reaches `0.10`. The default `0.20` undervalue score combines fair-value discount, normalized market probability, recent price percentile, BTC/contract divergence, required move, and time risk. After a fill it immediately posts an absolute `+0.05` take-profit order, while a 50% loss or the final 30 seconds can replace that order with a risk exit.
+
+The default previous-cycle regime requires at least 70% of pre-final-minute UP mids to remain in `0.30–0.70`, at least three full swings between `<=0.45` and `>=0.55`, a price range of at least `0.15`, and choppiness of at least `3`. The final 60 seconds are ignored because binary prices naturally converge toward 0 or 1 near settlement.
+
+```bash
+npm run backtest:btc5m -- --strategy btc5m:trend-range-regime --csv data/btc5m-history-8.csv
+```
+
+The combined strategy defaults to `TREND_RANGE_REGIME_RANGE_PRICE=0.40` and `TREND_RANGE_REGIME_RANGE_USDC_PER_LEG=0.80`, so two filled range legs use at most 1.6 USDC in total.
+
+```bash
+npm run backtest:btc5m -- --strategy btc5m:trend-range-overlay --csv data/btc5m-history-8.csv
+```
+
+Dry-run the live executor first:
+
+```bash
+TREND_RANGE_OVERLAY_DRY_RUN=true \
+TREND_RANGE_OVERLAY_RECORD_FILE=data/btc5m-trend-range-overlay-dry-run.csv \
+npm run btc5m:trend-range-overlay
+```
+
+The first cycle after startup runs trend-pullback only because no previous-cycle classification exists yet. Keep the process running across cycle boundaries so the range overlay can be activated. Set `TREND_RANGE_OVERLAY_DRY_RUN=false` to place real orders after reviewing the dry-run trajectory.
+
+The sustained-high fallback is enabled by default only in non-range cycles. It requires `0.90` to persist for 10 seconds, a same-direction BTC move of at least 3 bps, and cancels after a 2 bps BTC reversal or with fewer than 20 seconds left. Its default 4.50 USDC order buys five shares at `0.90`, satisfying the current CLOB minimum while capping the loss per fallback fill.
+
+The live CSV contains market snapshots, previous-cycle classification metrics, strategy decisions, order placement/fill/cancel events, and final resolution/PnL rows. `TREND_RANGE_OVERLAY_RECORD_FILE` can point to a new timestamped file for each experiment.
+
+`TREND_RANGE_OVERLAY_MARKET_LOG_INTERVAL_MS=1000` limits console/file market-price logs to one line per second without slowing order-book updates or strategy evaluation.
+
+Rejected live orders record the CLOB `errorMsg/status` in the CSV `event_error` column and retry after `TREND_RANGE_OVERLAY_ORDER_RETRY_SECONDS=5`. The runner also reads each market's `min_order_size` and refuses to silently exceed the configured USDC budget when the requested share size is too small.
+
+If no market-price update arrives for `TREND_RANGE_OVERLAY_MARKET_DATA_STALE_SECONDS=30`, the runner forces a WebSocket reconnect and resubscribes automatically. Cycle changes are serialized so a slow API response cannot initialize the same market multiple times.
+
+The overlay range component quotes both legs at `TREND_RANGE_OVERLAY_RANGE_FIRST_PRICE=0.40`. After one side fills, it keeps the opposite side at `TREND_RANGE_OVERLAY_RANGE_SECOND_PRICE=0.40`; equal share sizing keeps the fully paired cost at `TREND_RANGE_OVERLAY_RANGE_MAX_TOTAL_USDC=4`. The live defaults buy five shares per order to satisfy the current CLOB minimum: up to 4 USDC for trend-pullback plus 4 USDC for the range pair, or 8 USDC total in a range-signaled cycle. The runner still reads each market's actual `min_order_size` and skips orders that cannot fit the configured budget.
+
+`TREND_RANGE_OVERLAY_TREND_TAKE_PROFIT_PRICE` optionally applies a take-profit only to trend fills in range-signaled cycles. It defaults to `0` because `0.90` reduced returns on both current samples.
+
+Backtest and dry-run the adaptive overlay:
+
+```bash
+npm run backtest:btc5m -- --strategy btc5m:adaptive-overlay --csv data/btc5m-history-8.csv
+
+RUN_ID=$(date +%Y%m%d-%H%M%S)
+ADAPTIVE_OVERLAY_DRY_RUN=true \
+ADAPTIVE_OVERLAY_RECORD_FILE="data/adaptive-overlay-$RUN_ID.csv" \
+LOG_FILE_PATH="logs/adaptive-overlay-$RUN_ID.log" \
+npm run btc5m:adaptive-overlay
+```
+
+The adaptive overlay reuses the same executor, but reads only `ADAPTIVE_OVERLAY_*` settings. Trend-pullback remains always on; the previous-cycle classifier conditionally adds range-arb; sustained-high remains the non-range fallback; and deep-rebound independently searches both legs every cycle. The default maximum simultaneous configured capital is `10.02 USDC`: `4` trend + `4` range + up to `1.01` deep-rebound per leg. The small buffer above `1 USDC` prevents CLOB rounding from rejecting marketable BUY orders. Deep-rebound sell limits remain open until the bid reaches the target, or the strategy replaces them with a risk exit.
+
+Backtest the early extreme-price rebound strategy:
+
+```bash
+npm run backtest:btc5m -- \
+  --strategy btc5m:extreme-020-rebound \
+  --csv data/btc5m-history-8.csv \
+  --out logs/backtest-extreme-020.csv
+```
+
+This backtest treats an ask at or below the configured threshold as an immediately marketable fill. The default `0.18` threshold and disabled take-profit were positive on both current samples. Price, time, and near-settlement exits remain configurable but default to off because none improved both samples consistently.
+
+Backtest the final-30-second high-probability strategy:
+
+```bash
+npm run backtest:btc5m -- \
+  --strategy btc5m:final-30-high \
+  --csv data/btc5m-history-8.csv \
+  --out logs/backtest-final-30-high.csv
+```
+
+Dry-run the live executor with a timestamped trajectory:
+
+```bash
+RUN_ID=$(date +%Y%m%d-%H%M%S)
+FINAL_30_HIGH_DRY_RUN=true \
+FINAL_30_HIGH_ORDER_SHARES=5 \
+FINAL_30_HIGH_RECORD_FILE="data/final-30-high-$RUN_ID.csv" \
+LOG_FILE_PATH="logs/final-30-high-$RUN_ID.log" \
+npm run btc5m:final-30-high
+```
+
+The default five-share order satisfies the current CLOB minimum. At an entry price between `0.85` and `0.90`, each filled cycle uses approximately `4.25–4.50 USDC`.
+
+`FINAL_30_HIGH_MAX_ENTRY_PRICE` sets a hard price ceiling. If the selected leg is already above the ceiling, that cycle is skipped permanently instead of buying after a later reversal. On the current three-day sample, restricting entries to `0.85–0.90` materially improved ROI and drawdown.
 - `range-arb` or `btc5m:range-arb` — Backtests the fixed-price `RANGE_ARB_PRICE_X` / `RANGE_ARB_USDC_PER_LEG` strategy.
 - `market-maker` or `btc5m:market-maker` — Backtests the current bid-quoting market-maker logic using `MM_` parameters.
 - `hybrid` or `btc5m:hybrid` — Backtests the regime-switching edge/range-arb strategy.
