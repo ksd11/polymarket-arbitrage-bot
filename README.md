@@ -306,13 +306,35 @@ Dry-run the live executor with a timestamped trajectory:
 ```bash
 RUN_ID=$(date +%Y%m%d-%H%M%S)
 FINAL_30_HIGH_DRY_RUN=true \
-FINAL_30_HIGH_ORDER_SHARES=5 \
+FINAL_30_HIGH_ORDER_SHARES=2 \
 FINAL_30_HIGH_RECORD_FILE="data/final-30-high-$RUN_ID.csv" \
 LOG_FILE_PATH="logs/final-30-high-$RUN_ID.log" \
 npm run btc5m:final-30-high
 ```
 
-The default five-share order satisfies the current CLOB minimum. At an entry price between `0.85` and `0.90`, each filled cycle uses approximately `4.25–4.50 USDC`.
+The default two-share order uses approximately `1.70–1.80 USDC` at an entry price between `0.85` and `0.90`. The executor submits the order to the CLOB and reports any exchange-side rejection.
+
+Backtest the complementary-outcome hedge, which locks a pair only when entry cost plus the opposite ask is at most `0.95`:
+
+```bash
+npm run backtest:btc5m -- --strategy btc5m:final-30-hedged --csv data/btc5m-history-3days.csv
+```
+
+Backtest a five-point take-profit with a configurable stop below entry:
+
+```bash
+npm run backtest:btc5m -- --strategy btc5m:final-30-managed --csv data/btc5m-history-3days.csv
+```
+
+Dry-run the live managed strategy before enabling real orders:
+
+```bash
+RUN_ID=$(date +%Y%m%d-%H%M%S)
+FINAL_30_MANAGED_DRY_RUN=true \
+FINAL_30_MANAGED_RECORD_FILE="data/final-30-managed-$RUN_ID.csv" \
+LOG_FILE_PATH="logs/final-30-managed-$RUN_ID.log" \
+npm run btc5m:final-30-managed
+```
 
 `FINAL_30_HIGH_MAX_ENTRY_PRICE` sets a hard price ceiling. If the selected leg is already above the ceiling, that cycle is skipped permanently instead of buying after a later reversal. On the current three-day sample, restricting entries to `0.85–0.90` materially improved ROI and drawdown.
 - `range-arb` or `btc5m:range-arb` — Backtests the fixed-price `RANGE_ARB_PRICE_X` / `RANGE_ARB_USDC_PER_LEG` strategy.
