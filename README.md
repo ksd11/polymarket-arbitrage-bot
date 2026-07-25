@@ -344,6 +344,8 @@ npm run backtest:btc5m -- --strategy btc5m:dynamic-range-pullback --csv data/btc
 
 `dynamic-range-pullback` 不再要求某方向先达到固定 `0.80`，也不限制在 `0.58-0.62` 入场。它在剩余至少 60 秒时确认 BTC 方向持续 2 秒，并在对应合约从本轮峰值回调至少 `DYNAMIC_RANGE_PULLBACK_MIN_CONTRACT_PULLBACK` 后按当前 ask 开仓。
 
+默认启用合成卖出模式：首腿成交后，不再追加 USDC 买入低价反向腿，而是在原合约挂出 `1 - 目标反向价格` 的限价卖单。由于 `UP bid ≈ 1 - DOWN ask`，卖出原腿与等份买入反向腿的目标收益近似相同，但能立即释放资金并避开低价 BUY 的最低金额限制。设置 `DYNAMIC_RANGE_PULLBACK_SYNTHETIC_SELL=false` 可切回动态非等份反向配对。
+
 Combine it with the final-window managed strategy. The final component may enter only when the dynamic component has not locked a pair and has no open position:
 
 ```bash

@@ -1,5 +1,6 @@
 import {
     buildBtc5mDynamicRangePullbackOrders,
+    Btc5mDynamicRangePairPlan,
     Btc5mDynamicRangePullbackInput,
     Btc5mDynamicRangePullbackState,
 } from "./dynamic-range-pullback";
@@ -20,6 +21,7 @@ export type Btc5mDynamicRangeFinalManagedDecision = Btc5mStrategyDecision & {
     component: "dynamic" | "final" | "idle";
     dynamicState: Btc5mDynamicRangePullbackState;
     finalPosition?: Btc5mFinal30ManagedPosition;
+    dynamicEntryPlan?: Btc5mDynamicRangePairPlan;
 };
 
 export function buildBtc5mDynamicRangeFinalManagedOrders(input: Btc5mDynamicRangeFinalManagedInput): Btc5mDynamicRangeFinalManagedDecision {
@@ -46,6 +48,7 @@ function buildDynamicDecision(input: Btc5mDynamicRangeFinalManagedInput): Btc5mD
         component: "dynamic",
         dynamicState: decision.state,
         finalPosition: input.finalPosition,
+        dynamicEntryPlan: decision.entryPlan,
     };
 }
 

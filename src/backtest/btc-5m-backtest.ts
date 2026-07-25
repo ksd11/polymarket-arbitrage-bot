@@ -479,7 +479,13 @@ function loadConfig(): BacktestConfig {
         final30ManagedStopMaxDirectionalMarginBps: Number(getArgValue("--final-30-managed-stop-max-margin-bps") ?? envNumber("FINAL_30_MANAGED_STOP_MAX_DIRECTIONAL_MARGIN_BPS", 999)),
         dynamicRangePullbackParams: {
             minContractPullback: envNumber("DYNAMIC_RANGE_PULLBACK_MIN_CONTRACT_PULLBACK", 0.20),
+            minOrderNotional: envNumber("DYNAMIC_RANGE_PULLBACK_MIN_ORDER_NOTIONAL", 1.01),
             orderShares: envNumber("DYNAMIC_RANGE_PULLBACK_ORDER_SHARES", 2),
+            syntheticSell: booleanValue(process.env.DYNAMIC_RANGE_PULLBACK_SYNTHETIC_SELL, true),
+            dynamicSizing: booleanValue(process.env.DYNAMIC_RANGE_PULLBACK_DYNAMIC_SIZING, true),
+            maxPairUsdc: envNumber("DYNAMIC_RANGE_PULLBACK_MAX_PAIR_USDC", 8),
+            minLockedProfit: envNumber("DYNAMIC_RANGE_PULLBACK_MIN_LOCKED_PROFIT", 0.05),
+            shareStep: envNumber("DYNAMIC_RANGE_PULLBACK_SHARE_STEP", 0.0001),
             minSecondsLeftToOpen: envNumber("DYNAMIC_RANGE_PULLBACK_MIN_SECONDS_LEFT_TO_OPEN", 60),
             maxSecondsLeftToOpen: envNumber("DYNAMIC_RANGE_PULLBACK_MAX_SECONDS_LEFT_TO_OPEN", 300),
             minDirectionalBtcMarginBps: envNumber("DYNAMIC_RANGE_PULLBACK_MIN_BTC_MARGIN_BPS", 2),
@@ -578,7 +584,7 @@ function loadConfig(): BacktestConfig {
     if (!(cfg.final30ManagedTakeProfitDelta >= 0 && cfg.final30ManagedTakeProfitDelta < 1) || !(cfg.final30ManagedStopLossDelta >= 0 && cfg.final30ManagedStopLossDelta < 1)) throw new Error("Invalid final-30-managed exit deltas");
     if (cfg.final30ManagedStopMinBtcReversalBps < 0 || cfg.final30ManagedStopConfirmSeconds < 0 || cfg.final30ManagedStopMaxDirectionalMarginBps < 0) throw new Error("Invalid final-30-managed BTC stop confirmation");
     const dynamic = cfg.dynamicRangePullbackParams;
-    if (!(dynamic.minContractPullback > 0 && dynamic.minContractPullback < 1) || dynamic.orderShares <= 0 || dynamic.minSecondsLeftToOpen < 0 || dynamic.maxSecondsLeftToOpen <= dynamic.minSecondsLeftToOpen || dynamic.minDirectionalBtcMarginBps < 0 || dynamic.maxBtcRetracementBps < 0 || dynamic.maxSpread <= 0 || dynamic.entryConfirmSeconds < 0 || !(dynamic.earlyPairCost > 0 && dynamic.earlyPairCost <= dynamic.middlePairCost && dynamic.middlePairCost <= dynamic.latePairCost && dynamic.latePairCost < 1) || !(dynamic.stopLossDelta > 0 && dynamic.stopLossDelta < 1) || dynamic.stopConfirmSeconds < 0 || dynamic.maxNakedSeconds < 0) throw new Error("Invalid dynamic-range-pullback configuration");
+    if (!(dynamic.minContractPullback > 0 && dynamic.minContractPullback < 1) || dynamic.minOrderNotional <= 0 || dynamic.orderShares <= 0 || dynamic.maxPairUsdc < dynamic.minOrderNotional * 2 || dynamic.minLockedProfit < 0 || dynamic.shareStep <= 0 || dynamic.minSecondsLeftToOpen < 0 || dynamic.maxSecondsLeftToOpen <= dynamic.minSecondsLeftToOpen || dynamic.minDirectionalBtcMarginBps < 0 || dynamic.maxBtcRetracementBps < 0 || dynamic.maxSpread <= 0 || dynamic.entryConfirmSeconds < 0 || !(dynamic.earlyPairCost > 0 && dynamic.earlyPairCost <= dynamic.middlePairCost && dynamic.middlePairCost <= dynamic.latePairCost && dynamic.latePairCost < 1) || !(dynamic.stopLossDelta > 0 && dynamic.stopLossDelta < 1) || dynamic.stopConfirmSeconds < 0 || dynamic.maxNakedSeconds < 0) throw new Error("Invalid dynamic-range-pullback configuration");
     return cfg;
 }
 
@@ -1278,19 +1284,35 @@ function runDynamicRangePullbackBacktest(rows: MarketRow[], cfg: BacktestConfig)
             if (ask > 0 && ask <= quote.price + 1e-9) {
                 buyAtPrice(cycle, row, quote.leg, quote.price, quote.price * quote.size, quote.fair, quote.edge, quote.note);
                 if (!state.entryLeg) {
-                    nextState = { ...nextState, entryLeg: quote.leg, entryPrice: quote.price, entryShares: quote.size, entryAtMs: row.timestampMs, candidateLeg: undefined, candidateSinceMs: undefined };
+                    nextState = {
+                        ...nextState,
+                        entryLeg: quote.leg,
+                        entryPrice: quote.price,
+                        entryShares: quote.size,
+                        entryAtMs: row.timestampMs,
+                        plannedHedgePrice: decision.entryPlan?.hedgePrice,
+                        plannedHedgeShares: decision.entryPlan?.hedgeShares,
+                        plannedExitPrice: decision.entryPlan?.exitPrice,
+                        plannedLockedProfit: decision.entryPlan?.lockedProfit,
+                        syntheticSell: decision.entryPlan?.mode === "synthetic-sell",
+                        candidateLeg: undefined,
+                        candidateSinceMs: undefined,
+                    };
                     entries++;
                 } else {
-                    nextState = { ...nextState, pairedShares: (state.pairedShares ?? 0) + quote.size, paired: true };
+                    const pairedShares = (state.pairedShares ?? 0) + quote.size;
+                    nextState = { ...nextState, pairedShares, paired: pairedShares + 1e-9 >= (state.plannedHedgeShares ?? state.entryShares ?? pairedShares) };
                     paired++;
                 }
             }
         } else if (quote?.side === "SELL" && state.entryLeg && !state.exited) {
             const bid = quote.leg === "UP" ? row.upBid : row.downBid;
-            if (bid !== undefined && bid > 0) {
-                sellAtPrice(cycle, row, quote.leg, bid, quote.size, quote.fair, quote.edge, quote.note);
+            const restingTakeProfit = quote.note?.includes("take-profit") ?? false;
+            if (bid !== undefined && bid > 0 && (!restingTakeProfit || bid + 1e-9 >= quote.price)) {
+                sellAtPrice(cycle, row, quote.leg, restingTakeProfit ? quote.price : bid, quote.size, quote.fair, quote.edge, quote.note);
                 nextState = { ...nextState, exited: true };
-                if (quote.note?.includes("stop-loss")) stops++;
+                if (restingTakeProfit) paired++;
+                else if (quote.note?.includes("stop-loss")) stops++;
                 else timeouts++;
             }
         }
@@ -1298,7 +1320,9 @@ function runDynamicRangePullbackBacktest(rows: MarketRow[], cfg: BacktestConfig)
     }
     settleManagedCycles(cycles);
     const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
-    console.log(`Dynamic-range-pullback: entries=${entries}, paired=${paired}, pairRate=${entries ? (paired / entries * 100).toFixed(2) : "0.00"}%, stops=${stops}, timeouts=${timeouts}, settledNaked=${entries - paired - stops - timeouts}`);
+    const completionLabel = cfg.dynamicRangePullbackParams.syntheticSell ? "syntheticTakeProfits" : "paired";
+    const completionRateLabel = cfg.dynamicRangePullbackParams.syntheticSell ? "syntheticTakeProfitRate" : "pairRate";
+    console.log(`Dynamic-range-pullback: entries=${entries}, ${completionLabel}=${paired}, ${completionRateLabel}=${entries ? (paired / entries * 100).toFixed(2) : "0.00"}%, stops=${stops}, timeouts=${timeouts}, settledNaked=${entries - paired - stops - timeouts}`);
     return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
 }
 
@@ -1310,6 +1334,7 @@ function runDynamicRangeFinalManagedBacktest(rows: MarketRow[], cfg: BacktestCon
     let dynamicEntries = 0;
     let dynamicPairs = 0;
     let dynamicExits = 0;
+    let dynamicSyntheticTakeProfits = 0;
     let finalEntries = 0;
     let finalTakeProfits = 0;
     let finalStopLosses = 0;
@@ -1347,19 +1372,35 @@ function runDynamicRangeFinalManagedBacktest(rows: MarketRow[], cfg: BacktestCon
             if (ask > 0 && ask <= quote.price + 1e-9) {
                 buyAtPrice(cycle, row, quote.leg, quote.price, quote.price * quote.size, quote.fair, quote.edge, `dynamic-range-final-managed component=dynamic; ${quote.note ?? ""}`);
                 if (!dynamicState.entryLeg) {
-                    nextDynamicState = { ...nextDynamicState, entryLeg: quote.leg, entryPrice: quote.price, entryShares: quote.size, entryAtMs: row.timestampMs, candidateLeg: undefined, candidateSinceMs: undefined };
+                    nextDynamicState = {
+                        ...nextDynamicState,
+                        entryLeg: quote.leg,
+                        entryPrice: quote.price,
+                        entryShares: quote.size,
+                        entryAtMs: row.timestampMs,
+                        plannedHedgePrice: decision.dynamicEntryPlan?.hedgePrice,
+                        plannedHedgeShares: decision.dynamicEntryPlan?.hedgeShares,
+                        plannedExitPrice: decision.dynamicEntryPlan?.exitPrice,
+                        plannedLockedProfit: decision.dynamicEntryPlan?.lockedProfit,
+                        syntheticSell: decision.dynamicEntryPlan?.mode === "synthetic-sell",
+                        candidateLeg: undefined,
+                        candidateSinceMs: undefined,
+                    };
                     dynamicEntries++;
                 } else {
-                    nextDynamicState = { ...nextDynamicState, pairedShares: (dynamicState.pairedShares ?? 0) + quote.size, paired: true };
+                    const pairedShares = (dynamicState.pairedShares ?? 0) + quote.size;
+                    nextDynamicState = { ...nextDynamicState, pairedShares, paired: pairedShares + 1e-9 >= (dynamicState.plannedHedgeShares ?? dynamicState.entryShares ?? pairedShares) };
                     dynamicPairs++;
                 }
             }
         } else if (decision.component === "dynamic" && quote.side === "SELL" && dynamicState.entryLeg && !dynamicState.exited) {
             const bid = quote.leg === "UP" ? row.upBid : row.downBid;
-            if (bid !== undefined && bid > 0) {
-                sellAtPrice(cycle, row, quote.leg, bid, quote.size, quote.fair, quote.edge, `dynamic-range-final-managed component=dynamic; ${quote.note ?? ""}`);
+            const restingTakeProfit = quote.note?.includes("take-profit") ?? false;
+            if (bid !== undefined && bid > 0 && (!restingTakeProfit || bid + 1e-9 >= quote.price)) {
+                sellAtPrice(cycle, row, quote.leg, restingTakeProfit ? quote.price : bid, quote.size, quote.fair, quote.edge, `dynamic-range-final-managed component=dynamic; ${quote.note ?? ""}`);
                 nextDynamicState = { ...nextDynamicState, exited: true };
                 dynamicExits++;
+                if (restingTakeProfit) dynamicSyntheticTakeProfits++;
             }
         } else if (decision.component === "final" && quote.side === "BUY" && !finalPosition) {
             const ask = quote.leg === "UP" ? row.upAsk : row.downAsk;
@@ -1382,7 +1423,7 @@ function runDynamicRangeFinalManagedBacktest(rows: MarketRow[], cfg: BacktestCon
     }
     settleManagedCycles(cycles);
     const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
-    console.log(`Dynamic-range-final-managed: dynamicEntries=${dynamicEntries}, dynamicPairs=${dynamicPairs}, dynamicPairRate=${dynamicEntries ? (dynamicPairs / dynamicEntries * 100).toFixed(2) : "0.00"}%, dynamicExits=${dynamicExits}, finalEntries=${finalEntries}, finalTakeProfits=${finalTakeProfits}, finalStopLosses=${finalStopLosses}, finalSettled=${finalEntries - finalTakeProfits - finalStopLosses}`);
+    console.log(`Dynamic-range-final-managed: dynamicEntries=${dynamicEntries}, dynamicPairs=${dynamicPairs}, dynamicPairRate=${dynamicEntries ? (dynamicPairs / dynamicEntries * 100).toFixed(2) : "0.00"}%, dynamicSyntheticTakeProfits=${dynamicSyntheticTakeProfits}, dynamicExits=${dynamicExits}, finalEntries=${finalEntries}, finalTakeProfits=${finalTakeProfits}, finalStopLosses=${finalStopLosses}, finalSettled=${finalEntries - finalTakeProfits - finalStopLosses}`);
     return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
 }
 
@@ -2163,10 +2204,10 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
         console.log(`Params: ask>=${cfg.final30HighTriggerPrice} in final ${cfg.final30HighMaxSecondsLeftToOpen}s, maxEntry=${cfg.final30HighMaxEntryPrice}, shares=${cfg.final30HighOrderShares}, takeProfitDelta=${cfg.final30ManagedTakeProfitDelta}, stopLossDelta=${cfg.final30ManagedStopLossDelta}, stopBtcReversal=${cfg.final30ManagedStopMinBtcReversalBps}bps, stopConfirm=${cfg.final30ManagedStopConfirmSeconds}s, stopMaxMargin=${cfg.final30ManagedStopMaxDirectionalMarginBps}bps`);
     } else if (cfg.strategy === "dynamic-range-pullback") {
         const params = cfg.dynamicRangePullbackParams;
-        console.log(`Params: contractPullback>=${params.minContractPullback}, entry=currentAsk, shares=${params.orderShares}, secondsLeft=${params.minSecondsLeftToOpen}-${params.maxSecondsLeftToOpen}, confirm=${params.entryConfirmSeconds}s, btcMargin>=${params.minDirectionalBtcMarginBps}bps, btcRetracement<=${params.maxBtcRetracementBps}bps, pairCosts=${params.earlyPairCost}/${params.middlePairCost}/${params.latePairCost}, stopDelta=${params.stopLossDelta}, maxNaked=${params.maxNakedSeconds}s`);
+        console.log(`Params: contractPullback>=${params.minContractPullback}, entry=currentAsk, syntheticSell=${params.syntheticSell}, dynamicSizing=${params.dynamicSizing}, minShares=${params.orderShares}, pairCap=${params.maxPairUsdc}, lockedProfit>=${params.minLockedProfit}, secondsLeft=${params.minSecondsLeftToOpen}-${params.maxSecondsLeftToOpen}, confirm=${params.entryConfirmSeconds}s, btcMargin>=${params.minDirectionalBtcMarginBps}bps, btcRetracement<=${params.maxBtcRetracementBps}bps, pairCosts=${params.earlyPairCost}/${params.middlePairCost}/${params.latePairCost}, stopDelta=${params.stopLossDelta}, maxNaked=${params.maxNakedSeconds}s`);
     } else if (cfg.strategy === "dynamic-range-final-managed") {
         const params = cfg.dynamicRangePullbackParams;
-        console.log(`Params: dynamicPullback>=${params.minContractPullback}, dynamicShares=${params.orderShares}, finalTrigger=${cfg.final30HighTriggerPrice}, finalEarlyTrigger=${cfg.final30HighEarlyTriggerPrice}, finalWindow=${cfg.final30HighMinSecondsLeftToOpen}-${cfg.final30HighEarlyMaxSecondsLeftToOpen}s, finalShares=${cfg.final30HighOrderShares}`);
+        console.log(`Params: dynamicPullback>=${params.minContractPullback}, syntheticSell=${params.syntheticSell}, dynamicSizing=${params.dynamicSizing}, dynamicMinShares=${params.orderShares}, dynamicPairCap=${params.maxPairUsdc}, dynamicLockedProfit>=${params.minLockedProfit}, finalTrigger=${cfg.final30HighTriggerPrice}, finalEarlyTrigger=${cfg.final30HighEarlyTriggerPrice}, finalWindow=${cfg.final30HighMinSecondsLeftToOpen}-${cfg.final30HighEarlyMaxSecondsLeftToOpen}s, finalShares=${cfg.final30HighOrderShares}`);
     } else if (cfg.strategy === "trend-range-switch") {
         console.log(`Params: switchFailures=${cfg.trendRangeSwitchFailures}, rangePrice=${cfg.rangePriceX}, trendTrigger=${cfg.trendPullbackTriggerPrice}, trendEntry=${cfg.trendPullbackEntryPrice}, trendMaxOrderAgeSeconds=${cfg.trendPullbackMaxOrderAgeSeconds}`);
     } else if (cfg.strategy === "trend-range-regime") {
