@@ -176,10 +176,17 @@ function buildPositionDecision(input: Btc5mDynamicRangePullbackInput, state: Btc
     if (state.syntheticSell) {
         const exitPrice = state.plannedExitPrice;
         if (exitPrice !== undefined && exitPrice > (state.entryPrice ?? 1) && exitPrice < 1) {
+            if (bid === undefined || bid + 1e-9 < exitPrice) {
+                return {
+                    quotes: [],
+                    state: nextState,
+                    reason: `dynamic-range-pullback waiting synthetic sell bid>=${exitPrice.toFixed(2)} current=${bid?.toFixed(2) ?? "n/a"}`,
+                };
+            }
             return {
-                quotes: [{ key: `${entryLeg}:SELL`, leg: entryLeg, side: "SELL", price: exitPrice, size: state.entryShares ?? input.params.orderShares, note: `dynamic-range-pullback synthetic take-profit versus hedge@${hedgePrice.toFixed(2)}` }],
+                quotes: [{ key: `${entryLeg}:SELL`, leg: entryLeg, side: "SELL", price: exitPrice, size: state.entryShares ?? input.params.orderShares, note: `dynamic-range-pullback marketable synthetic take-profit versus hedge@${hedgePrice.toFixed(2)}` }],
                 state: nextState,
-                reason: `dynamic-range-pullback resting synthetic sell ${entryLeg}>=${exitPrice.toFixed(2)}`,
+                reason: `dynamic-range-pullback triggered synthetic sell ${entryLeg}@${exitPrice.toFixed(2)} bid=${bid.toFixed(2)}`,
             };
         }
         return { quotes: [], state: nextState, reason: "dynamic-range-pullback invalid synthetic sell target" };

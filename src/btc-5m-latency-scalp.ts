@@ -453,7 +453,6 @@ class LatencyScalpBot {
             this.nextOrderAttemptAt = Date.now() + this.cfg.orderRetryIntervalMs;
             logger.error(`Failed to post ${role} ${side} ${leg} ${size.toFixed(4)} @ ${price.toFixed(6)}: ${formatError(error)}`);
             if ((this.cfg.mode === "final-30-high" || this.cfg.mode === "final-30-managed") && role === "entry") this.state = { ...this.state, cancelled: true };
-            if (this.cfg.mode === "dynamic-range-final-managed" && role === "final-entry") this.finalBlocked = true;
         }
     }
 
