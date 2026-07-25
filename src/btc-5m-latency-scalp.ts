@@ -34,6 +34,8 @@ type RunnerConfig = {
     negRisk: boolean;
     evaluationIntervalMs: number;
     orderPollIntervalMs: number;
+    orderRetryIntervalMs: number;
+    entryMaxAgeSeconds: number;
     marketLogIntervalMs: number;
     recordIntervalMs: number;
     btcPriceRefreshMs: number;
@@ -104,6 +106,14 @@ function csvValue(value: RecordRow[keyof RecordRow]): string { if (value === und
 function appendRecord(path: string, row: RecordRow): void { mkdirSync(dirname(path), { recursive: true }); if (!existsSync(path)) appendFileSync(path, `${HEADERS.join(",")}\n`); appendFileSync(path, `${HEADERS.map((header) => csvValue(row[header])).join(",")}\n`); }
 function isFinal(status: string): boolean { return ["FILLED", "MATCHED", "CANCELLED", "CANCELED", "REJECTED", "FAILED"].includes(status.toUpperCase()); }
 function orderFilledSize(order: any): number { const value = Number(order?.size_matched ?? order?.sizeMatched ?? order?.filled_size ?? order?.filledSize ?? 0); return Number.isFinite(value) ? value : 0; }
+function formatError(error: unknown): string {
+    const value = error as any;
+    const message = error instanceof Error ? error.message : String(error);
+    const details = value?.response?.data ?? value?.data ?? value?.error;
+    if (details === undefined) return message;
+    try { return `${message} ${typeof details === "string" ? details : JSON.stringify(details)}`; }
+    catch { return message; }
+}
 function loadConfig(): RunnerConfig {
     const btc = defaultBtcPriceConfig();
     const requestedMode = process.env.BTC5M_SCALP_MODE;
@@ -119,6 +129,7 @@ function loadConfig(): RunnerConfig {
         intervalMinutes: envNumber(`${prefix}_INTERVAL_MINUTES`, 5), tickSize: envString(`${prefix}_TICK_SIZE`, "0.01") as CreateOrderOptions["tickSize"],
         negRisk: envBool(`${prefix}_NEG_RISK`, config.copytrade.negRisk), evaluationIntervalMs: envNumber(`${prefix}_EVALUATION_INTERVAL_MS`, deep ? 250 : 100),
         orderPollIntervalMs: envNumber(`${prefix}_ORDER_POLL_INTERVAL_MS`, deep ? 500 : 250), marketLogIntervalMs: envNumber(`${prefix}_MARKET_LOG_INTERVAL_MS`, 1000),
+        orderRetryIntervalMs: envNumber(`${prefix}_ORDER_RETRY_INTERVAL_MS`, 1_000), entryMaxAgeSeconds: envNumber(`${prefix}_ENTRY_MAX_AGE_SECONDS`, 2),
         recordIntervalMs: envNumber(`${prefix}_RECORD_INTERVAL_MS`, 1000), btcPriceRefreshMs: envNumber(`${prefix}_BTC_PRICE_REFRESH_MS`, Math.min(250, btc.refreshIntervalMs)),
         btcPriceMaxStaleMs: envNumber(`${prefix}_BTC_PRICE_MAX_STALE_MS`, btc.maxStalenessMs), btcPriceUrls: parseList(envString(`${prefix}_BTC_PRICE_URLS`, btc.urls.join("|"))),
         recordEnabled: envBool(`${prefix}_RECORD_ENABLED`, true), recordPath: resolve(envString(`${prefix}_RECORD_FILE`, `data/btc5m-${mode}-live.csv`)),
@@ -204,7 +215,7 @@ function loadConfig(): RunnerConfig {
     if ((final30Managed || dynamicRangeFinalManaged) && (!(cfg.final30ManagedParams.triggerPrice > 0.5 && cfg.final30ManagedParams.triggerPrice < 1 && cfg.final30ManagedParams.earlyTriggerPrice >= cfg.final30ManagedParams.triggerPrice && cfg.final30ManagedParams.earlyTriggerPrice <= cfg.final30ManagedParams.maxEntryPrice && cfg.final30ManagedParams.maxEntryPrice < 1) || cfg.final30ManagedParams.orderShares <= 0 || cfg.final30ManagedParams.earlyMaxSecondsLeftToOpen < cfg.final30ManagedParams.maxSecondsLeftToOpen || cfg.final30ManagedParams.takeProfitDelta < 0 || cfg.final30ManagedParams.stopLossDelta < 0 || cfg.final30ManagedParams.stopMinBtcReversalBps < 0 || cfg.final30ManagedParams.stopConfirmSeconds < 0 || cfg.final30ManagedParams.stopMaxDirectionalMarginBps < 0)) throw new Error("Invalid FINAL_30_MANAGED configuration");
     const dynamic = cfg.dynamicRangePullbackParams;
     if (dynamicRangeFinalManaged && (!(dynamic.minContractPullback > 0 && dynamic.minContractPullback < 1) || dynamic.orderShares <= 0 || dynamic.maxSecondsLeftToOpen <= dynamic.minSecondsLeftToOpen || dynamic.maxSpread <= 0 || dynamic.entryConfirmSeconds < 0 || !(dynamic.earlyPairCost > 0 && dynamic.earlyPairCost <= dynamic.middlePairCost && dynamic.middlePairCost <= dynamic.latePairCost && dynamic.latePairCost < 1) || dynamic.stopLossDelta <= 0 || dynamic.stopConfirmSeconds < 0 || dynamic.maxNakedSeconds < 0)) throw new Error("Invalid DYNAMIC_RANGE_PULLBACK configuration");
-    if ((deep ? cfg.deepParams.orderUsdc : cfg.params.orderUsdc) <= 0 || cfg.evaluationIntervalMs < 50 || cfg.orderPollIntervalMs < 100) throw new Error("Invalid scalp budget or intervals");
+    if ((deep ? cfg.deepParams.orderUsdc : cfg.params.orderUsdc) <= 0 || cfg.evaluationIntervalMs < 50 || cfg.orderPollIntervalMs < 100 || cfg.orderRetryIntervalMs < 250 || cfg.entryMaxAgeSeconds <= 0) throw new Error("Invalid scalp budget or intervals");
     return cfg;
 }
 
@@ -243,9 +254,11 @@ class LatencyScalpBot {
     private accountingByAsset = new Map<string, Accounting>();
     private timers: NodeJS.Timeout[] = [];
     private evaluating = false;
+    private polling = false;
     private switching = false;
     private stopped = false;
     private lastRecordAt = 0;
+    private nextOrderAttemptAt = 0;
 
     constructor(private client: ClobClient, private cfg: RunnerConfig) {
         this.btc = new BtcPriceProvider({ urls: cfg.btcPriceUrls, refreshIntervalMs: cfg.btcPriceRefreshMs, maxStalenessMs: cfg.btcPriceMaxStaleMs });
@@ -283,7 +296,7 @@ class LatencyScalpBot {
     }
 
     private async cycleTick(): Promise<void> {
-        if (this.stopped || this.switching) return;
+        if (this.stopped || this.switching || this.evaluating || this.polling) return;
         const cycle = cycleNow(this.cfg.market, this.cfg.intervalMinutes);
         if (this.tokens?.slug === cycle.slug) return;
         this.switching = true;
@@ -315,7 +328,7 @@ class LatencyScalpBot {
     }
 
     private async evaluate(): Promise<void> {
-        if (this.stopped || this.switching || this.evaluating || !this.tokens || !this.ws) return;
+        if (this.stopped || this.switching || this.evaluating || this.polling || !this.tokens || !this.ws) return;
         this.evaluating = true;
         try {
             const now = Date.now(); const secondsLeft = Math.max(0, (this.tokens.endMs - now) / 1000);
@@ -372,10 +385,13 @@ class LatencyScalpBot {
             }
             if (this.cfg.mode === "dynamic-range-final-managed" && this.active(this.entryOrder)) {
                 const expectedRole: Role | undefined = quote?.side === "BUY" ? combinedDecision?.component === "final" ? "final-entry" : this.dynamicState.entryLeg ? "dynamic-hedge" : "dynamic-entry" : undefined;
-                if (!expectedRole || this.entryOrder!.role !== expectedRole || this.entryOrder!.leg !== quote!.leg || Math.abs(this.entryOrder!.price - quote!.price) > 1e-9) await this.cancelOrder(this.entryOrder, "combined entry quote changed");
+                const orderAgeSeconds = (now - this.entryOrder!.placedAtMs) / 1000;
+                const hedgeChanged = this.entryOrder!.role === "dynamic-hedge" && (!expectedRole || expectedRole !== "dynamic-hedge" || this.entryOrder!.leg !== quote!.leg || Math.abs(this.entryOrder!.price - quote!.price) > 1e-9);
+                const entryExpired = (this.entryOrder!.role === "dynamic-entry" || this.entryOrder!.role === "final-entry") && orderAgeSeconds >= this.cfg.entryMaxAgeSeconds;
+                if (hedgeChanged || entryExpired) await this.cancelOrder(this.entryOrder, hedgeChanged ? "combined hedge quote changed" : "combined entry expired");
             }
             const canBuy = this.cfg.mode === "dynamic-range-final-managed" ? !this.managedPosition : !this.state.exited;
-            if (quote?.side === "BUY" && canBuy && !this.active(this.entryOrder)) {
+            if (quote?.side === "BUY" && canBuy && !this.active(this.entryOrder) && now >= this.nextOrderAttemptAt) {
                 const role: Role = this.cfg.mode !== "dynamic-range-final-managed" ? "entry" : combinedDecision?.component === "final" ? "final-entry" : this.dynamicState.entryLeg ? "dynamic-hedge" : "dynamic-entry";
                 await this.placeOrder(role, quote.leg, quote.side, quote.price, quote.size);
             }
@@ -384,7 +400,7 @@ class LatencyScalpBot {
                 const role: Role = quote.note?.includes("take profit") || quote.note?.includes("take-profit") ? "take-profit" : "risk-exit";
                 if (this.active(this.exitOrder) && (this.exitOrder!.role !== role || Math.abs(this.exitOrder!.price - quote.price) > 1e-9)) await this.cancelOrder(this.exitOrder, "exit quote changed");
                 const size = this.cfg.mode === "dynamic-range-final-managed" ? Math.min(quote.size, this.availableShares(quote.leg)) : quote.size;
-                if (!this.active(this.exitOrder) && size > 1e-9) await this.placeOrder(role, quote.leg, quote.side, quote.price, size);
+                if (!this.active(this.exitOrder) && size > 1e-9 && now >= this.nextOrderAttemptAt) await this.placeOrder(role, quote.leg, quote.side, quote.price, size);
             }
             this.recordDecision(now, secondsLeft, up, down, btcPrice, decision.reason, decision.quotes, combinedDecision?.component);
         } finally { this.evaluating = false; }
@@ -423,9 +439,11 @@ class LatencyScalpBot {
             if (!orderId || response?.success === false) throw new Error(String(response?.errorMsg ?? response?.status ?? "CLOB returned no orderID"));
             const order = { ...base, orderId } satisfies TrackedOrder;
             if (side === "BUY") this.entryOrder = order; else this.exitOrder = order;
+            this.nextOrderAttemptAt = 0;
             logger.info(`Posted ${role} ${side} ${leg} ${size.toFixed(4)} @ ${price.toFixed(2)}`); this.recordOrder("order_posted", order);
         } catch (error) {
-            logger.error(`Failed to post ${role}: ${error instanceof Error ? error.message : String(error)}`);
+            this.nextOrderAttemptAt = Date.now() + this.cfg.orderRetryIntervalMs;
+            logger.error(`Failed to post ${role} ${side} ${leg} ${size.toFixed(4)} @ ${price.toFixed(6)}: ${formatError(error)}`);
             if ((this.cfg.mode === "final-30-high" || this.cfg.mode === "final-30-managed") && role === "entry") this.state = { ...this.state, cancelled: true };
             if (this.cfg.mode === "dynamic-range-final-managed" && role === "final-entry") this.finalBlocked = true;
         }
@@ -444,18 +462,19 @@ class LatencyScalpBot {
     }
 
     private async pollOrders(): Promise<void> {
-        if (this.cfg.dryRun || this.stopped) return;
-        for (const order of [this.entryOrder, this.exitOrder]) {
-            if (!this.active(order)) continue;
-            try {
-                const latest = await this.client.getOrder(order!.orderId); if (!latest) continue;
-                order!.status = String((latest as any).status || order!.status); order!.filledSize = orderFilledSize(latest);
-                const newlyFilled = Math.max(0, order!.filledSize - order!.accountedFilledSize);
-                if (newlyFilled > 0) {
-                    order!.accountedFilledSize = order!.filledSize; this.accountFill(order!, newlyFilled, order!.price); this.recordOrder("order_fill", order!);
-                    if (order!.filledSize + 1e-9 < order!.size) await this.cancelOrder(order, "partial fill; cancel remainder");
-                }
-            } catch (error) { logger.error(`Failed to poll order: ${error instanceof Error ? error.message : String(error)}`); }
+        if (this.cfg.dryRun || this.stopped || this.evaluating || this.polling) return;
+        this.polling = true;
+        try {
+            for (const order of [this.entryOrder, this.exitOrder]) {
+                if (!this.active(order)) continue;
+                try {
+                    const latest = await this.client.getOrder(order!.orderId); if (!latest) continue;
+                    this.reconcileOrder(order!, latest, "order_fill");
+                    if (order!.filledSize > 0 && order!.filledSize + 1e-9 < order!.size) await this.cancelOrder(order, "partial fill; cancel remainder");
+                } catch (error) { logger.error(`Failed to poll order: ${formatError(error)}`); }
+            }
+        } finally {
+            this.polling = false;
         }
     }
 
@@ -500,8 +519,23 @@ class LatencyScalpBot {
     private async cancelOrder(order: TrackedOrder | null, reason: string): Promise<void> {
         if (!this.active(order)) return;
         if (this.cfg.dryRun) { order!.status = "CANCELLED"; this.recordOrder("dry_run_order_cancelled", order!); return; }
-        try { await this.client.cancelOrder({ orderID: order!.orderId }); order!.status = "CANCELLED"; this.recordOrder("order_cancelled", order!); logger.info(`Cancelled ${order!.role} (${reason})`); }
-        catch (error) { logger.error(`Failed to cancel ${order!.role}: ${error instanceof Error ? error.message : String(error)}`); }
+        try {
+            await this.client.cancelOrder({ orderID: order!.orderId });
+            const latest = await this.client.getOrder(order!.orderId).catch(() => undefined);
+            if (latest) this.reconcileOrder(order!, latest, "order_fill_during_cancel");
+            if (!isFinal(order!.status)) order!.status = "CANCELLED";
+            this.recordOrder("order_cancelled", order!); logger.info(`Cancelled ${order!.role} (${reason})`);
+        } catch (error) { logger.error(`Failed to cancel ${order!.role}: ${formatError(error)}`); }
+    }
+
+    private reconcileOrder(order: TrackedOrder, latest: any, fillEvent: string): void {
+        order.status = String(latest?.status || order.status);
+        order.filledSize = orderFilledSize(latest);
+        const newlyFilled = Math.max(0, order.filledSize - order.accountedFilledSize);
+        if (newlyFilled <= 0) return;
+        order.accountedFilledSize = order.filledSize;
+        this.accountFill(order, newlyFilled, order.price);
+        this.recordOrder(fillEvent, order);
     }
 
     private handleResolution(payload: MarketResolvedPayload): void {

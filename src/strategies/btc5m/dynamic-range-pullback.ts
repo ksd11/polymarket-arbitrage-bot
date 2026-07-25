@@ -117,7 +117,7 @@ function buildPositionDecision(input: Btc5mDynamicRangePullbackInput, state: Btc
         : secondsLeft > input.params.middlePairSecondsLeft
             ? input.params.middlePairCost
             : input.params.latePairCost;
-    const hedgePrice = maxPairCost - (state.entryPrice ?? 0);
+    const hedgePrice = floorToTick(maxPairCost - (state.entryPrice ?? 0), 0.01);
     const bid = entryLeg === "UP" ? input.upBid : input.downBid;
     const crossedStrike = directionalMarginBps(entryLeg, input.openPrice, input.btcPrice) <= 0;
     const stopPrice = Math.max(0.01, (state.entryPrice ?? 0) - input.params.stopLossDelta);
@@ -160,4 +160,8 @@ function directionalRetracementBps(leg: Btc5mLeg, peakPrice?: number, currentPri
 
 function resetCandidate(state: Btc5mDynamicRangePullbackState): Btc5mDynamicRangePullbackState {
     return { ...state, candidateLeg: undefined, candidateSinceMs: undefined };
+}
+
+function floorToTick(value: number, tick: number): number {
+    return Math.floor((value + 1e-9) / tick) * tick;
 }
