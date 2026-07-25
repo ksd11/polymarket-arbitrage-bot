@@ -16,11 +16,13 @@ import { buildBtc5mExtreme020ReboundOrders, Btc5mExtreme020Position } from "../s
 import { buildBtc5mFinal30HighOrders } from "../strategies/btc5m/final-30-high";
 import { buildBtc5mFinal30HedgedOrders, Btc5mFinal30HedgedPosition } from "../strategies/btc5m/final-30-hedged";
 import { buildBtc5mFinal30ManagedOrders, Btc5mFinal30ManagedPosition } from "../strategies/btc5m/final-30-managed";
+import { buildBtc5mDynamicRangePullbackOrders, Btc5mDynamicRangePullbackParams, Btc5mDynamicRangePullbackState } from "../strategies/btc5m/dynamic-range-pullback";
+import { buildBtc5mDynamicRangeFinalManagedOrders } from "../strategies/btc5m/dynamic-range-final-managed";
 import { Btc5mRegimeSnapshot } from "../strategies/btc5m/regime";
 import { Btc5mStrategyQuote } from "../strategies/btc5m/types";
 
 type Leg = "UP" | "DOWN";
-type BacktestStrategy = "edge" | "range-arb" | "market-maker" | "hybrid" | "managed-edge" | "adaptive-edge" | "trend-pullback" | "trend-range-switch" | "trend-range-regime" | "trend-range-overlay" | "adaptive-overlay" | "sustained-high" | "latency-scalp" | "deep-rebound" | "extreme-020-rebound" | "final-30-high" | "final-30-hedged" | "final-30-managed";
+type BacktestStrategy = "edge" | "range-arb" | "market-maker" | "hybrid" | "managed-edge" | "adaptive-edge" | "trend-pullback" | "trend-range-switch" | "trend-range-regime" | "trend-range-overlay" | "adaptive-overlay" | "sustained-high" | "latency-scalp" | "deep-rebound" | "extreme-020-rebound" | "final-30-high" | "final-30-hedged" | "final-30-managed" | "dynamic-range-pullback" | "dynamic-range-final-managed";
 
 type BacktestConfig = {
     strategy: BacktestStrategy;
@@ -167,6 +169,7 @@ type BacktestConfig = {
     final30ManagedStopMinBtcReversalBps: number;
     final30ManagedStopConfirmSeconds: number;
     final30ManagedStopMaxDirectionalMarginBps: number;
+    dynamicRangePullbackParams: Btc5mDynamicRangePullbackParams;
     adaptiveOverlayDeepInRange: boolean;
 };
 
@@ -254,7 +257,7 @@ function envNumber(name: string, fallback: number): number {
 function usage(): string {
     return [
         "Usage:",
-        "  npm run backtest:btc5m -- --strategy <edge|managed-edge|adaptive-edge|trend-pullback|sustained-high|latency-scalp|deep-rebound|extreme-020-rebound|final-30-high|final-30-hedged|final-30-managed|trend-range-switch|trend-range-regime|trend-range-overlay|adaptive-overlay|range-arb|market-maker|hybrid> --csv <path>",
+        "  npm run backtest:btc5m -- --strategy <edge|managed-edge|adaptive-edge|trend-pullback|sustained-high|latency-scalp|deep-rebound|extreme-020-rebound|final-30-high|final-30-hedged|final-30-managed|dynamic-range-pullback|dynamic-range-final-managed|trend-range-switch|trend-range-regime|trend-range-overlay|adaptive-overlay|range-arb|market-maker|hybrid> --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:edge --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:range-arb --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:market-maker --csv <path>",
@@ -267,6 +270,8 @@ function usage(): string {
         "  npm run backtest:btc5m -- --strategy btc5m:final-30-high --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:final-30-hedged --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:final-30-managed --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:dynamic-range-pullback --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:dynamic-range-final-managed --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:adaptive-overlay --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:trend-range-switch --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:trend-range-regime --csv <path>",
@@ -311,6 +316,8 @@ function parseStrategy(value: string | undefined): BacktestStrategy {
     if (value === "final-30-high" || value === "btc5m:final-30-high") return "final-30-high";
     if (value === "final-30-hedged" || value === "btc5m:final-30-hedged") return "final-30-hedged";
     if (value === "final-30-managed" || value === "btc5m:final-30-managed") return "final-30-managed";
+    if (value === "dynamic-range-pullback" || value === "btc5m:dynamic-range-pullback") return "dynamic-range-pullback";
+    if (value === "dynamic-range-final-managed" || value === "btc5m:dynamic-range-final-managed") return "dynamic-range-final-managed";
     if (value === "adaptive-overlay" || value === "btc5m:adaptive-overlay") return "adaptive-overlay";
     throw new Error(`Unsupported or missing strategy: ${value || "(empty)"}\n\n${usage()}`);
 }
@@ -470,6 +477,24 @@ function loadConfig(): BacktestConfig {
         final30ManagedStopMinBtcReversalBps: Number(getArgValue("--final-30-managed-stop-min-btc-reversal-bps") ?? envNumber("FINAL_30_MANAGED_STOP_MIN_BTC_REVERSAL_BPS", 2)),
         final30ManagedStopConfirmSeconds: Number(getArgValue("--final-30-managed-stop-confirm-seconds") ?? envNumber("FINAL_30_MANAGED_STOP_CONFIRM_SECONDS", 2)),
         final30ManagedStopMaxDirectionalMarginBps: Number(getArgValue("--final-30-managed-stop-max-margin-bps") ?? envNumber("FINAL_30_MANAGED_STOP_MAX_DIRECTIONAL_MARGIN_BPS", 999)),
+        dynamicRangePullbackParams: {
+            minContractPullback: envNumber("DYNAMIC_RANGE_PULLBACK_MIN_CONTRACT_PULLBACK", 0.20),
+            orderShares: envNumber("DYNAMIC_RANGE_PULLBACK_ORDER_SHARES", 2),
+            minSecondsLeftToOpen: envNumber("DYNAMIC_RANGE_PULLBACK_MIN_SECONDS_LEFT_TO_OPEN", 60),
+            maxSecondsLeftToOpen: envNumber("DYNAMIC_RANGE_PULLBACK_MAX_SECONDS_LEFT_TO_OPEN", 300),
+            minDirectionalBtcMarginBps: envNumber("DYNAMIC_RANGE_PULLBACK_MIN_BTC_MARGIN_BPS", 2),
+            maxBtcRetracementBps: envNumber("DYNAMIC_RANGE_PULLBACK_MAX_BTC_RETRACEMENT_BPS", 3),
+            maxSpread: envNumber("DYNAMIC_RANGE_PULLBACK_MAX_SPREAD", 0.03),
+            entryConfirmSeconds: envNumber("DYNAMIC_RANGE_PULLBACK_ENTRY_CONFIRM_SECONDS", 2),
+            earlyPairCost: envNumber("DYNAMIC_RANGE_PULLBACK_EARLY_PAIR_COST", 0.85),
+            middlePairCost: envNumber("DYNAMIC_RANGE_PULLBACK_MIDDLE_PAIR_COST", 0.90),
+            latePairCost: envNumber("DYNAMIC_RANGE_PULLBACK_LATE_PAIR_COST", 0.95),
+            earlyPairSecondsLeft: envNumber("DYNAMIC_RANGE_PULLBACK_EARLY_PAIR_SECONDS_LEFT", 120),
+            middlePairSecondsLeft: envNumber("DYNAMIC_RANGE_PULLBACK_MIDDLE_PAIR_SECONDS_LEFT", 60),
+            stopLossDelta: envNumber("DYNAMIC_RANGE_PULLBACK_STOP_LOSS_DELTA", 0.10),
+            stopConfirmSeconds: envNumber("DYNAMIC_RANGE_PULLBACK_STOP_CONFIRM_SECONDS", 2),
+            maxNakedSeconds: envNumber("DYNAMIC_RANGE_PULLBACK_MAX_NAKED_SECONDS", 60),
+        },
         adaptiveOverlayDeepInRange: booleanValue(getArgValue("--adaptive-overlay-deep-in-range") ?? process.env.ADAPTIVE_OVERLAY_DEEP_IN_RANGE, true),
     };
 
@@ -552,6 +577,8 @@ function loadConfig(): BacktestConfig {
     if (!(cfg.final30HedgedMaxPairCost > 0 && cfg.final30HedgedMaxPairCost < 1)) throw new Error("FINAL_30_HEDGED_MAX_PAIR_COST must be between 0 and 1");
     if (!(cfg.final30ManagedTakeProfitDelta >= 0 && cfg.final30ManagedTakeProfitDelta < 1) || !(cfg.final30ManagedStopLossDelta >= 0 && cfg.final30ManagedStopLossDelta < 1)) throw new Error("Invalid final-30-managed exit deltas");
     if (cfg.final30ManagedStopMinBtcReversalBps < 0 || cfg.final30ManagedStopConfirmSeconds < 0 || cfg.final30ManagedStopMaxDirectionalMarginBps < 0) throw new Error("Invalid final-30-managed BTC stop confirmation");
+    const dynamic = cfg.dynamicRangePullbackParams;
+    if (!(dynamic.minContractPullback > 0 && dynamic.minContractPullback < 1) || dynamic.orderShares <= 0 || dynamic.minSecondsLeftToOpen < 0 || dynamic.maxSecondsLeftToOpen <= dynamic.minSecondsLeftToOpen || dynamic.minDirectionalBtcMarginBps < 0 || dynamic.maxBtcRetracementBps < 0 || dynamic.maxSpread <= 0 || dynamic.entryConfirmSeconds < 0 || !(dynamic.earlyPairCost > 0 && dynamic.earlyPairCost <= dynamic.middlePairCost && dynamic.middlePairCost <= dynamic.latePairCost && dynamic.latePairCost < 1) || !(dynamic.stopLossDelta > 0 && dynamic.stopLossDelta < 1) || dynamic.stopConfirmSeconds < 0 || dynamic.maxNakedSeconds < 0) throw new Error("Invalid dynamic-range-pullback configuration");
     return cfg;
 }
 
@@ -1176,20 +1203,7 @@ function runFinal30ManagedBacktest(rows: MarketRow[], cfg: BacktestConfig): { cy
             openPrice: cycle.openPrice,
             position,
             blocked: blocked.has(row.slug),
-            params: {
-                triggerPrice: cfg.final30HighTriggerPrice,
-                earlyTriggerPrice: cfg.final30HighEarlyTriggerPrice,
-                maxEntryPrice: cfg.final30HighMaxEntryPrice,
-                orderShares: cfg.final30HighOrderShares,
-                maxSecondsLeftToOpen: cfg.final30HighMaxSecondsLeftToOpen,
-                earlyMaxSecondsLeftToOpen: cfg.final30HighEarlyMaxSecondsLeftToOpen,
-                minSecondsLeftToOpen: cfg.final30HighMinSecondsLeftToOpen,
-                takeProfitDelta: cfg.final30ManagedTakeProfitDelta,
-                stopLossDelta: cfg.final30ManagedStopLossDelta,
-                stopMinBtcReversalBps: cfg.final30ManagedStopMinBtcReversalBps,
-                stopConfirmSeconds: cfg.final30ManagedStopConfirmSeconds,
-                stopMaxDirectionalMarginBps: cfg.final30ManagedStopMaxDirectionalMarginBps,
-            },
+            params: final30ManagedParams(cfg),
         });
         if (position && decision.position) positions.set(row.slug, decision.position);
         if (!position && decision.reason?.includes("blocked:")) blocked.add(row.slug);
@@ -1213,6 +1227,162 @@ function runFinal30ManagedBacktest(rows: MarketRow[], cfg: BacktestConfig): { cy
     const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
     const entries = positions.size;
     console.log(`Final-30-managed: entries=${entries}, takeProfits=${takeProfits}, stopLosses=${stopLosses}, settled=${entries - takeProfits - stopLosses}`);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
+function final30ManagedParams(cfg: BacktestConfig) {
+    return {
+        triggerPrice: cfg.final30HighTriggerPrice,
+        earlyTriggerPrice: cfg.final30HighEarlyTriggerPrice,
+        maxEntryPrice: cfg.final30HighMaxEntryPrice,
+        orderShares: cfg.final30HighOrderShares,
+        maxSecondsLeftToOpen: cfg.final30HighMaxSecondsLeftToOpen,
+        earlyMaxSecondsLeftToOpen: cfg.final30HighEarlyMaxSecondsLeftToOpen,
+        minSecondsLeftToOpen: cfg.final30HighMinSecondsLeftToOpen,
+        takeProfitDelta: cfg.final30ManagedTakeProfitDelta,
+        stopLossDelta: cfg.final30ManagedStopLossDelta,
+        stopMinBtcReversalBps: cfg.final30ManagedStopMinBtcReversalBps,
+        stopConfirmSeconds: cfg.final30ManagedStopConfirmSeconds,
+        stopMaxDirectionalMarginBps: cfg.final30ManagedStopMaxDirectionalMarginBps,
+    };
+}
+
+function runDynamicRangePullbackBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    const cycles = createCycleMap(rows, cfg);
+    const states = new Map<string, Btc5mDynamicRangePullbackState>();
+    let entries = 0;
+    let paired = 0;
+    let stops = 0;
+    let timeouts = 0;
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+        const state = states.get(row.slug) ?? {};
+        const decision = buildBtc5mDynamicRangePullbackOrders({
+            timestampMs: row.timestampMs,
+            endMs: cycle.endMs,
+            btcPrice: row.btcPrice,
+            openPrice: cycle.openPrice,
+            upAsk: row.upAsk,
+            downAsk: row.downAsk,
+            upBid: row.upBid,
+            downBid: row.downBid,
+            state,
+            params: cfg.dynamicRangePullbackParams,
+        });
+        let nextState = decision.state;
+        const quote = decision.quotes[0];
+        if (quote?.side === "BUY") {
+            const ask = quote.leg === "UP" ? row.upAsk : row.downAsk;
+            if (ask > 0 && ask <= quote.price + 1e-9) {
+                buyAtPrice(cycle, row, quote.leg, quote.price, quote.price * quote.size, quote.fair, quote.edge, quote.note);
+                if (!state.entryLeg) {
+                    nextState = { ...nextState, entryLeg: quote.leg, entryPrice: quote.price, entryShares: quote.size, entryAtMs: row.timestampMs, candidateLeg: undefined, candidateSinceMs: undefined };
+                    entries++;
+                } else {
+                    nextState = { ...nextState, pairedShares: (state.pairedShares ?? 0) + quote.size, paired: true };
+                    paired++;
+                }
+            }
+        } else if (quote?.side === "SELL" && state.entryLeg && !state.exited) {
+            const bid = quote.leg === "UP" ? row.upBid : row.downBid;
+            if (bid !== undefined && bid > 0) {
+                sellAtPrice(cycle, row, quote.leg, bid, quote.size, quote.fair, quote.edge, quote.note);
+                nextState = { ...nextState, exited: true };
+                if (quote.note?.includes("stop-loss")) stops++;
+                else timeouts++;
+            }
+        }
+        states.set(row.slug, nextState);
+    }
+    settleManagedCycles(cycles);
+    const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
+    console.log(`Dynamic-range-pullback: entries=${entries}, paired=${paired}, pairRate=${entries ? (paired / entries * 100).toFixed(2) : "0.00"}%, stops=${stops}, timeouts=${timeouts}, settledNaked=${entries - paired - stops - timeouts}`);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
+function runDynamicRangeFinalManagedBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    const cycles = createCycleMap(rows, cfg);
+    const dynamicStates = new Map<string, Btc5mDynamicRangePullbackState>();
+    const finalPositions = new Map<string, Btc5mFinal30ManagedPosition>();
+    const finalBlocked = new Set<string>();
+    let dynamicEntries = 0;
+    let dynamicPairs = 0;
+    let dynamicExits = 0;
+    let finalEntries = 0;
+    let finalTakeProfits = 0;
+    let finalStopLosses = 0;
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+        const dynamicState = dynamicStates.get(row.slug) ?? {};
+        const finalPosition = finalPositions.get(row.slug);
+        const decision = buildBtc5mDynamicRangeFinalManagedOrders({
+            timestampMs: row.timestampMs,
+            endMs: cycle.endMs,
+            btcPrice: row.btcPrice,
+            openPrice: cycle.openPrice,
+            upAsk: row.upAsk,
+            downAsk: row.downAsk,
+            upBid: row.upBid,
+            downBid: row.downBid,
+            state: dynamicState,
+            params: cfg.dynamicRangePullbackParams,
+            finalPosition,
+            finalBlocked: finalBlocked.has(row.slug),
+            finalParams: final30ManagedParams(cfg),
+        });
+        let nextDynamicState = decision.dynamicState;
+        if (decision.finalPosition) finalPositions.set(row.slug, decision.finalPosition);
+        if (decision.component === "final" && !finalPosition && decision.reason?.includes("blocked:")) finalBlocked.add(row.slug);
+        const quote = decision.quotes[0];
+        if (!quote) {
+            dynamicStates.set(row.slug, nextDynamicState);
+            continue;
+        }
+        if (decision.component === "dynamic" && quote.side === "BUY") {
+            const ask = quote.leg === "UP" ? row.upAsk : row.downAsk;
+            if (ask > 0 && ask <= quote.price + 1e-9) {
+                buyAtPrice(cycle, row, quote.leg, quote.price, quote.price * quote.size, quote.fair, quote.edge, `dynamic-range-final-managed component=dynamic; ${quote.note ?? ""}`);
+                if (!dynamicState.entryLeg) {
+                    nextDynamicState = { ...nextDynamicState, entryLeg: quote.leg, entryPrice: quote.price, entryShares: quote.size, entryAtMs: row.timestampMs, candidateLeg: undefined, candidateSinceMs: undefined };
+                    dynamicEntries++;
+                } else {
+                    nextDynamicState = { ...nextDynamicState, pairedShares: (dynamicState.pairedShares ?? 0) + quote.size, paired: true };
+                    dynamicPairs++;
+                }
+            }
+        } else if (decision.component === "dynamic" && quote.side === "SELL" && dynamicState.entryLeg && !dynamicState.exited) {
+            const bid = quote.leg === "UP" ? row.upBid : row.downBid;
+            if (bid !== undefined && bid > 0) {
+                sellAtPrice(cycle, row, quote.leg, bid, quote.size, quote.fair, quote.edge, `dynamic-range-final-managed component=dynamic; ${quote.note ?? ""}`);
+                nextDynamicState = { ...nextDynamicState, exited: true };
+                dynamicExits++;
+            }
+        } else if (decision.component === "final" && quote.side === "BUY" && !finalPosition) {
+            const ask = quote.leg === "UP" ? row.upAsk : row.downAsk;
+            if (ask > 0 && ask < 1 && ask <= quote.price + 1e-9) {
+                buyAtPrice(cycle, row, quote.leg, ask, ask * quote.size, quote.fair, quote.edge, `dynamic-range-final-managed component=final; ${quote.note ?? ""}`);
+                finalPositions.set(row.slug, { leg: quote.leg, entryPrice: ask, entryBtcPrice: row.btcPrice, shares: quote.size, exited: false });
+                finalEntries++;
+            }
+        } else if (decision.component === "final" && quote.side === "SELL" && finalPosition && !finalPosition.exited) {
+            const bid = quote.leg === "UP" ? row.upBid : row.downBid;
+            if (bid !== undefined && bid > 0 && bid + 1e-9 >= quote.price) {
+                sellAtPrice(cycle, row, quote.leg, quote.price, quote.size, quote.fair, quote.edge, `dynamic-range-final-managed component=final; ${quote.note ?? ""}`);
+                (decision.finalPosition ?? finalPosition).exited = true;
+                finalPositions.set(row.slug, decision.finalPosition ?? finalPosition);
+                if (quote.note?.includes("take-profit")) finalTakeProfits++;
+                else finalStopLosses++;
+            }
+        }
+        dynamicStates.set(row.slug, nextDynamicState);
+    }
+    settleManagedCycles(cycles);
+    const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
+    console.log(`Dynamic-range-final-managed: dynamicEntries=${dynamicEntries}, dynamicPairs=${dynamicPairs}, dynamicPairRate=${dynamicEntries ? (dynamicPairs / dynamicEntries * 100).toFixed(2) : "0.00"}%, dynamicExits=${dynamicExits}, finalEntries=${finalEntries}, finalTakeProfits=${finalTakeProfits}, finalStopLosses=${finalStopLosses}, finalSettled=${finalEntries - finalTakeProfits - finalStopLosses}`);
     return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
 }
 
@@ -1947,7 +2117,7 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
     console.log(`Strategy: ${cfg.strategy}`);
     console.log(`CSV: ${cfg.csvPath}`);
     console.log(`Cycles: ${cycles.length}, traded cycles: ${tradedCycles}`);
-    if (cfg.strategy === "trend-pullback" || cfg.strategy === "sustained-high" || cfg.strategy === "latency-scalp" || cfg.strategy === "deep-rebound" || cfg.strategy === "extreme-020-rebound" || cfg.strategy === "final-30-high" || cfg.strategy === "final-30-hedged" || cfg.strategy === "final-30-managed" || cfg.strategy === "trend-range-switch" || cfg.strategy === "trend-range-regime" || cfg.strategy === "trend-range-overlay" || cfg.strategy === "adaptive-overlay") {
+    if (cfg.strategy === "trend-pullback" || cfg.strategy === "sustained-high" || cfg.strategy === "latency-scalp" || cfg.strategy === "deep-rebound" || cfg.strategy === "extreme-020-rebound" || cfg.strategy === "final-30-high" || cfg.strategy === "final-30-hedged" || cfg.strategy === "final-30-managed" || cfg.strategy === "dynamic-range-pullback" || cfg.strategy === "dynamic-range-final-managed" || cfg.strategy === "trend-range-switch" || cfg.strategy === "trend-range-regime" || cfg.strategy === "trend-range-overlay" || cfg.strategy === "adaptive-overlay") {
         const entries = trades.filter((trade) => trade.cost > 0);
         const profitableCycles = cycles.filter((cycle) => {
             const cost = cycle.trades.reduce((sum, trade) => sum + trade.cost, 0);
@@ -1991,6 +2161,12 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
         console.log(`Params: ask>=${cfg.final30HighTriggerPrice} in final ${cfg.final30HighMaxSecondsLeftToOpen}s, maxEntry=${cfg.final30HighMaxEntryPrice}, shares=${cfg.final30HighOrderShares}, maxPairCost=${cfg.final30HedgedMaxPairCost}`);
     } else if (cfg.strategy === "final-30-managed") {
         console.log(`Params: ask>=${cfg.final30HighTriggerPrice} in final ${cfg.final30HighMaxSecondsLeftToOpen}s, maxEntry=${cfg.final30HighMaxEntryPrice}, shares=${cfg.final30HighOrderShares}, takeProfitDelta=${cfg.final30ManagedTakeProfitDelta}, stopLossDelta=${cfg.final30ManagedStopLossDelta}, stopBtcReversal=${cfg.final30ManagedStopMinBtcReversalBps}bps, stopConfirm=${cfg.final30ManagedStopConfirmSeconds}s, stopMaxMargin=${cfg.final30ManagedStopMaxDirectionalMarginBps}bps`);
+    } else if (cfg.strategy === "dynamic-range-pullback") {
+        const params = cfg.dynamicRangePullbackParams;
+        console.log(`Params: contractPullback>=${params.minContractPullback}, entry=currentAsk, shares=${params.orderShares}, secondsLeft=${params.minSecondsLeftToOpen}-${params.maxSecondsLeftToOpen}, confirm=${params.entryConfirmSeconds}s, btcMargin>=${params.minDirectionalBtcMarginBps}bps, btcRetracement<=${params.maxBtcRetracementBps}bps, pairCosts=${params.earlyPairCost}/${params.middlePairCost}/${params.latePairCost}, stopDelta=${params.stopLossDelta}, maxNaked=${params.maxNakedSeconds}s`);
+    } else if (cfg.strategy === "dynamic-range-final-managed") {
+        const params = cfg.dynamicRangePullbackParams;
+        console.log(`Params: dynamicPullback>=${params.minContractPullback}, dynamicShares=${params.orderShares}, finalTrigger=${cfg.final30HighTriggerPrice}, finalEarlyTrigger=${cfg.final30HighEarlyTriggerPrice}, finalWindow=${cfg.final30HighMinSecondsLeftToOpen}-${cfg.final30HighEarlyMaxSecondsLeftToOpen}s, finalShares=${cfg.final30HighOrderShares}`);
     } else if (cfg.strategy === "trend-range-switch") {
         console.log(`Params: switchFailures=${cfg.trendRangeSwitchFailures}, rangePrice=${cfg.rangePriceX}, trendTrigger=${cfg.trendPullbackTriggerPrice}, trendEntry=${cfg.trendPullbackEntryPrice}, trendMaxOrderAgeSeconds=${cfg.trendPullbackMaxOrderAgeSeconds}`);
     } else if (cfg.strategy === "trend-range-regime") {
@@ -2123,6 +2299,10 @@ function runStrategy(cfg: BacktestConfig, records: Record<string, string>[]): { 
             return runFinal30HedgedBacktest(rows, cfg);
         case "final-30-managed":
             return runFinal30ManagedBacktest(rows, cfg);
+        case "dynamic-range-pullback":
+            return runDynamicRangePullbackBacktest(rows, cfg);
+        case "dynamic-range-final-managed":
+            return runDynamicRangeFinalManagedBacktest(rows, cfg);
         case "trend-range-switch":
             return runTrendRangeSwitchBacktest(rows, cfg);
         case "trend-range-regime":

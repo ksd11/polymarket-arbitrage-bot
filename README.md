@@ -336,6 +336,30 @@ LOG_FILE_PATH="logs/final-30-managed-$RUN_ID.log" \
 npm run btc5m:final-30-managed
 ```
 
+Backtest the trend-pullback entry with a time-dependent complementary hedge:
+
+```bash
+npm run backtest:btc5m -- --strategy btc5m:dynamic-range-pullback --csv data/btc5m-history-3days.csv
+```
+
+`dynamic-range-pullback` 不再要求某方向先达到固定 `0.80`，也不限制在 `0.58-0.62` 入场。它在剩余至少 60 秒时确认 BTC 方向持续 2 秒，并在对应合约从本轮峰值回调至少 `DYNAMIC_RANGE_PULLBACK_MIN_CONTRACT_PULLBACK` 后按当前 ask 开仓。
+
+Combine it with the final-window managed strategy. The final component may enter only when the dynamic component has not locked a pair and has no open position:
+
+```bash
+npm run backtest:btc5m -- --strategy btc5m:dynamic-range-final-managed --csv data/btc5m-history-3days.csv
+```
+
+Run the combined strategy live with separate trajectory and console logs:
+
+```bash
+RUN_ID=$(date +%Y%m%d-%H%M%S)
+DYNAMIC_RANGE_FINAL_MANAGED_DRY_RUN=false \
+DYNAMIC_RANGE_FINAL_MANAGED_RECORD_FILE="data/dynamic-range-final-managed-$RUN_ID.csv" \
+LOG_FILE_PATH="logs/dynamic-range-final-managed-$RUN_ID.log" \
+npm run btc5m:dynamic-range-final-managed
+```
+
 `FINAL_30_HIGH_MAX_ENTRY_PRICE` sets a hard price ceiling. If the selected leg is already above the ceiling, that cycle is skipped permanently instead of buying after a later reversal. On the current three-day sample, restricting entries to `0.85–0.90` materially improved ROI and drawdown.
 - `range-arb` or `btc5m:range-arb` — Backtests the fixed-price `RANGE_ARB_PRICE_X` / `RANGE_ARB_USDC_PER_LEG` strategy.
 - `market-maker` or `btc5m:market-maker` — Backtests the current bid-quoting market-maker logic using `MM_` parameters.

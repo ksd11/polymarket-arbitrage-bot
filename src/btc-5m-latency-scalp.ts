@@ -15,16 +15,18 @@ import { buildBtc5mLatencyScalpOrders, Btc5mLatencyScalpParams, Btc5mLatencyScal
 import { buildBtc5mDeepReboundOrders, Btc5mDeepReboundParams } from "./strategies/btc5m/deep-rebound";
 import { buildBtc5mFinal30HighOrders, Btc5mFinal30HighParams } from "./strategies/btc5m/final-30-high";
 import { buildBtc5mFinal30ManagedOrders, Btc5mFinal30ManagedParams, Btc5mFinal30ManagedPosition } from "./strategies/btc5m/final-30-managed";
+import { Btc5mDynamicRangePullbackParams, Btc5mDynamicRangePullbackState } from "./strategies/btc5m/dynamic-range-pullback";
+import { buildBtc5mDynamicRangeFinalManagedOrders, Btc5mDynamicRangeFinalManagedDecision } from "./strategies/btc5m/dynamic-range-final-managed";
 import { Btc5mRegimeSnapshot } from "./strategies/btc5m/regime";
 import { waitForMinimumUsdcBalance } from "./utils/balance";
 import { setupConsoleFileLogging } from "./utils/console-file";
 import { logger } from "./utils/logger";
 
 type Leg = "UP" | "DOWN";
-type Role = "entry" | "take-profit" | "risk-exit";
+type Role = "entry" | "dynamic-entry" | "dynamic-hedge" | "final-entry" | "take-profit" | "risk-exit";
 
 type RunnerConfig = {
-    mode: "latency-scalp" | "deep-rebound" | "final-30-high" | "final-30-managed";
+    mode: "latency-scalp" | "deep-rebound" | "final-30-high" | "final-30-managed" | "dynamic-range-final-managed";
     dryRun: boolean;
     market: string;
     intervalMinutes: number;
@@ -43,6 +45,7 @@ type RunnerConfig = {
     deepParams: Btc5mDeepReboundParams;
     final30HighParams: Btc5mFinal30HighParams;
     final30ManagedParams: Btc5mFinal30ManagedParams;
+    dynamicRangePullbackParams: Btc5mDynamicRangePullbackParams;
 };
 
 type Tokens = {
@@ -75,6 +78,10 @@ type Accounting = {
     shares: number;
     proceeds: number;
     soldShares: number;
+    sharesUp: number;
+    sharesDown: number;
+    soldUp: number;
+    soldDown: number;
     resolved: boolean;
 };
 
@@ -82,6 +89,7 @@ const HEADERS = [
     "row_type", "timestamp", "timestamp_ms", "slug", "condition_id", "dry_run",
     "btc_price", "open_price", "seconds_left", "up_bid", "up_ask", "down_bid", "down_ask",
     "candidate_leg", "triggered_leg", "state_filled", "state_cancelled", "state_exited", "decision_reason", "quotes",
+    "strategy_component", "dynamic_entry_leg", "dynamic_paired", "dynamic_exited", "final_blocked",
     "event_role", "event_leg", "event_side", "event_price", "event_size", "event_cost", "order_id", "order_status", "filled_size", "event_error",
     "winning_outcome", "entry_cost", "exit_proceeds", "settlement_payout", "pnl",
 ] as const;
@@ -99,11 +107,12 @@ function orderFilledSize(order: any): number { const value = Number(order?.size_
 function loadConfig(): RunnerConfig {
     const btc = defaultBtcPriceConfig();
     const requestedMode = process.env.BTC5M_SCALP_MODE;
-    const mode: RunnerConfig["mode"] = requestedMode === "deep-rebound" ? "deep-rebound" : requestedMode === "final-30-high" ? "final-30-high" : requestedMode === "final-30-managed" ? "final-30-managed" : "latency-scalp";
+    const mode: RunnerConfig["mode"] = requestedMode === "deep-rebound" ? "deep-rebound" : requestedMode === "final-30-high" ? "final-30-high" : requestedMode === "final-30-managed" ? "final-30-managed" : requestedMode === "dynamic-range-final-managed" ? "dynamic-range-final-managed" : "latency-scalp";
     const deep = mode === "deep-rebound";
     const final30High = mode === "final-30-high";
     const final30Managed = mode === "final-30-managed";
-    const prefix = deep ? "DEEP_REBOUND" : final30High ? "FINAL_30_HIGH" : final30Managed ? "FINAL_30_MANAGED" : "LATENCY_SCALP";
+    const dynamicRangeFinalManaged = mode === "dynamic-range-final-managed";
+    const prefix = deep ? "DEEP_REBOUND" : final30High ? "FINAL_30_HIGH" : final30Managed ? "FINAL_30_MANAGED" : dynamicRangeFinalManaged ? "DYNAMIC_RANGE_FINAL_MANAGED" : "LATENCY_SCALP";
     const cfg: RunnerConfig = {
         mode,
         dryRun: envBool(`${prefix}_DRY_RUN`, true), market: envString(`${prefix}_MARKET`, "btc").toLowerCase(),
@@ -169,12 +178,32 @@ function loadConfig(): RunnerConfig {
             stopConfirmSeconds: envNumber("FINAL_30_MANAGED_STOP_CONFIRM_SECONDS", 2),
             stopMaxDirectionalMarginBps: envNumber("FINAL_30_MANAGED_STOP_MAX_DIRECTIONAL_MARGIN_BPS", 999),
         },
+        dynamicRangePullbackParams: {
+            minContractPullback: envNumber("DYNAMIC_RANGE_PULLBACK_MIN_CONTRACT_PULLBACK", 0.20),
+            orderShares: envNumber("DYNAMIC_RANGE_PULLBACK_ORDER_SHARES", 2),
+            minSecondsLeftToOpen: envNumber("DYNAMIC_RANGE_PULLBACK_MIN_SECONDS_LEFT_TO_OPEN", 60),
+            maxSecondsLeftToOpen: envNumber("DYNAMIC_RANGE_PULLBACK_MAX_SECONDS_LEFT_TO_OPEN", 300),
+            minDirectionalBtcMarginBps: envNumber("DYNAMIC_RANGE_PULLBACK_MIN_BTC_MARGIN_BPS", 2),
+            maxBtcRetracementBps: envNumber("DYNAMIC_RANGE_PULLBACK_MAX_BTC_RETRACEMENT_BPS", 3),
+            maxSpread: envNumber("DYNAMIC_RANGE_PULLBACK_MAX_SPREAD", 0.03),
+            entryConfirmSeconds: envNumber("DYNAMIC_RANGE_PULLBACK_ENTRY_CONFIRM_SECONDS", 2),
+            earlyPairCost: envNumber("DYNAMIC_RANGE_PULLBACK_EARLY_PAIR_COST", 0.85),
+            middlePairCost: envNumber("DYNAMIC_RANGE_PULLBACK_MIDDLE_PAIR_COST", 0.90),
+            latePairCost: envNumber("DYNAMIC_RANGE_PULLBACK_LATE_PAIR_COST", 0.95),
+            earlyPairSecondsLeft: envNumber("DYNAMIC_RANGE_PULLBACK_EARLY_PAIR_SECONDS_LEFT", 120),
+            middlePairSecondsLeft: envNumber("DYNAMIC_RANGE_PULLBACK_MIDDLE_PAIR_SECONDS_LEFT", 60),
+            stopLossDelta: envNumber("DYNAMIC_RANGE_PULLBACK_STOP_LOSS_DELTA", 0.10),
+            stopConfirmSeconds: envNumber("DYNAMIC_RANGE_PULLBACK_STOP_CONFIRM_SECONDS", 2),
+            maxNakedSeconds: envNumber("DYNAMIC_RANGE_PULLBACK_MAX_NAKED_SECONDS", 60),
+        },
     };
     if (!deep && !(cfg.params.minSignalPrice > 0 && cfg.params.minSignalPrice <= cfg.params.entryPrice && cfg.params.entryPrice < cfg.params.takeProfitPrice && cfg.params.takeProfitPrice < 1)) throw new Error("Invalid latency-scalp prices");
     if (deep && !(cfg.deepParams.minEntryPrice > 0 && cfg.deepParams.minEntryPrice < cfg.deepParams.maxEntryPrice && cfg.deepParams.maxEntryPrice < 1)) throw new Error("Invalid deep-rebound prices");
     if (deep && (cfg.deepParams.orderUsdc < 1.01 || cfg.deepParams.maxUsdcPerLeg < cfg.deepParams.orderUsdc)) throw new Error("Marketable deep-rebound BUY requires DEEP_REBOUND_ORDER_USDC >= 1.01 and matching max budget");
     if (final30High && (!(cfg.final30HighParams.triggerPrice > 0.5 && cfg.final30HighParams.triggerPrice < 1 && cfg.final30HighParams.earlyTriggerPrice >= cfg.final30HighParams.triggerPrice && cfg.final30HighParams.earlyTriggerPrice <= cfg.final30HighParams.maxEntryPrice && cfg.final30HighParams.maxEntryPrice < 1) || cfg.final30HighParams.orderShares <= 0 || cfg.final30HighParams.earlyMaxSecondsLeftToOpen < cfg.final30HighParams.maxSecondsLeftToOpen)) throw new Error("Invalid FINAL_30_HIGH tiered configuration");
-    if (final30Managed && (!(cfg.final30ManagedParams.triggerPrice > 0.5 && cfg.final30ManagedParams.triggerPrice < 1 && cfg.final30ManagedParams.earlyTriggerPrice >= cfg.final30ManagedParams.triggerPrice && cfg.final30ManagedParams.earlyTriggerPrice <= cfg.final30ManagedParams.maxEntryPrice && cfg.final30ManagedParams.maxEntryPrice < 1) || cfg.final30ManagedParams.orderShares <= 0 || cfg.final30ManagedParams.earlyMaxSecondsLeftToOpen < cfg.final30ManagedParams.maxSecondsLeftToOpen || cfg.final30ManagedParams.takeProfitDelta < 0 || cfg.final30ManagedParams.stopLossDelta < 0 || cfg.final30ManagedParams.stopMinBtcReversalBps < 0 || cfg.final30ManagedParams.stopConfirmSeconds < 0 || cfg.final30ManagedParams.stopMaxDirectionalMarginBps < 0)) throw new Error("Invalid FINAL_30_MANAGED configuration");
+    if ((final30Managed || dynamicRangeFinalManaged) && (!(cfg.final30ManagedParams.triggerPrice > 0.5 && cfg.final30ManagedParams.triggerPrice < 1 && cfg.final30ManagedParams.earlyTriggerPrice >= cfg.final30ManagedParams.triggerPrice && cfg.final30ManagedParams.earlyTriggerPrice <= cfg.final30ManagedParams.maxEntryPrice && cfg.final30ManagedParams.maxEntryPrice < 1) || cfg.final30ManagedParams.orderShares <= 0 || cfg.final30ManagedParams.earlyMaxSecondsLeftToOpen < cfg.final30ManagedParams.maxSecondsLeftToOpen || cfg.final30ManagedParams.takeProfitDelta < 0 || cfg.final30ManagedParams.stopLossDelta < 0 || cfg.final30ManagedParams.stopMinBtcReversalBps < 0 || cfg.final30ManagedParams.stopConfirmSeconds < 0 || cfg.final30ManagedParams.stopMaxDirectionalMarginBps < 0)) throw new Error("Invalid FINAL_30_MANAGED configuration");
+    const dynamic = cfg.dynamicRangePullbackParams;
+    if (dynamicRangeFinalManaged && (!(dynamic.minContractPullback > 0 && dynamic.minContractPullback < 1) || dynamic.orderShares <= 0 || dynamic.maxSecondsLeftToOpen <= dynamic.minSecondsLeftToOpen || dynamic.maxSpread <= 0 || dynamic.entryConfirmSeconds < 0 || !(dynamic.earlyPairCost > 0 && dynamic.earlyPairCost <= dynamic.middlePairCost && dynamic.middlePairCost <= dynamic.latePairCost && dynamic.latePairCost < 1) || dynamic.stopLossDelta <= 0 || dynamic.stopConfirmSeconds < 0 || dynamic.maxNakedSeconds < 0)) throw new Error("Invalid DYNAMIC_RANGE_PULLBACK configuration");
     if ((deep ? cfg.deepParams.orderUsdc : cfg.params.orderUsdc) <= 0 || cfg.evaluationIntervalMs < 50 || cfg.orderPollIntervalMs < 100) throw new Error("Invalid scalp budget or intervals");
     return cfg;
 }
@@ -202,7 +231,9 @@ class LatencyScalpBot {
     private btc: BtcPriceProvider;
     private tokens: Tokens | null = null;
     private state: Btc5mLatencyScalpState = {};
+    private dynamicState: Btc5mDynamicRangePullbackState = {};
     private managedPosition?: Btc5mFinal30ManagedPosition;
+    private finalBlocked = false;
     private history: Btc5mRegimeSnapshot[] = [];
     private btcOpenPrice?: number;
     private lastBtcPrice?: number;
@@ -228,6 +259,8 @@ class LatencyScalpBot {
                 ? `ask>=${this.cfg.final30HighParams.earlyTriggerPrice} until ${this.cfg.final30HighParams.earlyMaxSecondsLeftToOpen}s, then >=${this.cfg.final30HighParams.triggerPrice} in final ${this.cfg.final30HighParams.maxSecondsLeftToOpen}s, max=${this.cfg.final30HighParams.maxEntryPrice}, shares=${this.cfg.final30HighParams.orderShares}`
                 : this.cfg.mode === "final-30-managed"
                     ? `ask>=${this.cfg.final30ManagedParams.triggerPrice} in final ${this.cfg.final30ManagedParams.maxSecondsLeftToOpen}s, max=${this.cfg.final30ManagedParams.maxEntryPrice}, shares=${this.cfg.final30ManagedParams.orderShares}, takeProfitDelta=${this.cfg.final30ManagedParams.takeProfitDelta}, stopLossDelta=${this.cfg.final30ManagedParams.stopLossDelta}, btcReversal=${this.cfg.final30ManagedParams.stopMinBtcReversalBps}bps/${this.cfg.final30ManagedParams.stopConfirmSeconds}s`
+                : this.cfg.mode === "dynamic-range-final-managed"
+                    ? `dynamicPullback>=${this.cfg.dynamicRangePullbackParams.minContractPullback}, dynamicShares=${this.cfg.dynamicRangePullbackParams.orderShares}, finalTrigger=${this.cfg.final30ManagedParams.triggerPrice}, finalShares=${this.cfg.final30ManagedParams.orderShares}`
                 : `signal=${p.minSignalPrice}-${p.entryPrice}, momentum=${p.minContractMomentum}, entry=${p.entryPrice}, takeProfit=${p.takeProfitPrice}`;
         logger.info(`Starting ${this.cfg.mode}: ${description}, dryRun=${this.cfg.dryRun}`);
         logger.info(`Trajectory CSV: ${this.cfg.recordPath}`);
@@ -263,7 +296,7 @@ class LatencyScalpBot {
     }
 
     private resetCycle(): void {
-        this.tokens = null; this.state = {}; this.managedPosition = undefined; this.history = []; this.btcOpenPrice = undefined; this.lastBtcPrice = undefined;
+        this.tokens = null; this.state = {}; this.dynamicState = {}; this.managedPosition = undefined; this.finalBlocked = false; this.history = []; this.btcOpenPrice = undefined; this.lastBtcPrice = undefined;
         this.entryOrder = null; this.exitOrder = null; this.accounting = null; this.lastRecordAt = 0;
     }
 
@@ -271,7 +304,7 @@ class LatencyScalpBot {
         try {
             const tokens = await fetchTokens(cycleNow(this.cfg.market, this.cfg.intervalMinutes));
             this.tokens = tokens;
-            this.accounting = { tokens, cost: 0, shares: 0, proceeds: 0, soldShares: 0, resolved: false };
+            this.accounting = { tokens, cost: 0, shares: 0, proceeds: 0, soldShares: 0, sharesUp: 0, sharesDown: 0, soldUp: 0, soldDown: 0, resolved: false };
             this.accountingByAsset.set(tokens.upTokenId, this.accounting); this.accountingByAsset.set(tokens.downTokenId, this.accounting);
             if (!this.ws) throw new Error("WebSocket unavailable");
             this.ws.subscribeToTokenIds([tokens.upTokenId, tokens.downTokenId]);
@@ -315,8 +348,16 @@ class LatencyScalpBot {
                     ? buildBtc5mFinal30HighOrders({ timestampMs: now, endMs: this.tokens.endMs, upAsk: up.bestAsk, downAsk: down.bestAsk, entered: Boolean(this.state.filled || this.state.cancelled || this.active(this.entryOrder)), params: this.cfg.final30HighParams })
                     : this.cfg.mode === "final-30-managed"
                         ? buildBtc5mFinal30ManagedOrders({ timestampMs: now, endMs: this.tokens.endMs, upAsk: up.bestAsk, downAsk: down.bestAsk, upBid: up.bestBid ?? undefined, downBid: down.bestBid ?? undefined, btcPrice, openPrice: this.btcOpenPrice, position: this.managedPosition, blocked: Boolean(this.state.cancelled || (!this.managedPosition && this.active(this.entryOrder))), params: this.cfg.final30ManagedParams })
+                    : this.cfg.mode === "dynamic-range-final-managed"
+                        ? buildBtc5mDynamicRangeFinalManagedOrders({ timestampMs: now, endMs: this.tokens.endMs, upAsk: up.bestAsk, downAsk: down.bestAsk, upBid: up.bestBid ?? undefined, downBid: down.bestBid ?? undefined, btcPrice, openPrice: this.btcOpenPrice, state: this.dynamicState, params: this.cfg.dynamicRangePullbackParams, finalPosition: this.managedPosition, finalBlocked: this.finalBlocked, finalParams: this.cfg.final30ManagedParams })
                     : buildBtc5mLatencyScalpOrders({ timestampMs: now, endMs: this.tokens.endMs, upAsk: up.bestAsk, downAsk: down.bestAsk, upBid: up.bestBid ?? undefined, downBid: down.bestBid ?? undefined, btcPrice, openPrice: this.btcOpenPrice, state: this.state, params: this.cfg.params });
+            const combinedDecision = this.cfg.mode === "dynamic-range-final-managed" ? decision as Btc5mDynamicRangeFinalManagedDecision : undefined;
             if (this.cfg.mode === "final-30-managed" && "position" in decision && decision.position) this.managedPosition = decision.position as Btc5mFinal30ManagedPosition;
+            if (combinedDecision) {
+                this.dynamicState = combinedDecision.dynamicState;
+                if (combinedDecision.finalPosition) this.managedPosition = combinedDecision.finalPosition;
+                if (combinedDecision.component === "final" && combinedDecision.reason?.includes("blocked:")) this.finalBlocked = true;
+            }
             if ("state" in decision) {
                 const wasCancelled = Boolean(this.state.cancelled); this.state = decision.state;
                 if (!wasCancelled && this.state.cancelled) await this.cancelOrder(this.entryOrder, decision.reason || "strategy cancelled");
@@ -326,26 +367,45 @@ class LatencyScalpBot {
             if (this.cfg.mode === "deep-rebound" && quote?.side !== "BUY" && !this.state.filled && this.active(this.entryOrder)) {
                 await this.cancelOrder(this.entryOrder, "deep-rebound signal disappeared");
             }
-            if (this.cfg.mode === "final-30-managed" && quote?.side !== "SELL" && this.active(this.exitOrder)) {
+            if ((this.cfg.mode === "final-30-managed" || this.cfg.mode === "dynamic-range-final-managed") && quote?.side !== "SELL" && this.active(this.exitOrder)) {
                 await this.cancelOrder(this.exitOrder, "managed exit signal disappeared");
             }
-            if (quote?.side === "BUY" && !this.state.exited && !this.active(this.entryOrder)) await this.placeOrder("entry", quote.leg, quote.side, quote.price, quote.size);
+            if (this.cfg.mode === "dynamic-range-final-managed" && this.active(this.entryOrder)) {
+                const expectedRole: Role | undefined = quote?.side === "BUY" ? combinedDecision?.component === "final" ? "final-entry" : this.dynamicState.entryLeg ? "dynamic-hedge" : "dynamic-entry" : undefined;
+                if (!expectedRole || this.entryOrder!.role !== expectedRole || this.entryOrder!.leg !== quote!.leg || Math.abs(this.entryOrder!.price - quote!.price) > 1e-9) await this.cancelOrder(this.entryOrder, "combined entry quote changed");
+            }
+            const canBuy = this.cfg.mode === "dynamic-range-final-managed" ? !this.managedPosition : !this.state.exited;
+            if (quote?.side === "BUY" && canBuy && !this.active(this.entryOrder)) {
+                const role: Role = this.cfg.mode !== "dynamic-range-final-managed" ? "entry" : combinedDecision?.component === "final" ? "final-entry" : this.dynamicState.entryLeg ? "dynamic-hedge" : "dynamic-entry";
+                await this.placeOrder(role, quote.leg, quote.side, quote.price, quote.size);
+            }
             if (quote?.side === "SELL") {
+                if (this.active(this.entryOrder)) await this.cancelOrder(this.entryOrder, "risk exit takes priority");
                 const role: Role = quote.note?.includes("take profit") || quote.note?.includes("take-profit") ? "take-profit" : "risk-exit";
                 if (this.active(this.exitOrder) && (this.exitOrder!.role !== role || Math.abs(this.exitOrder!.price - quote.price) > 1e-9)) await this.cancelOrder(this.exitOrder, "exit quote changed");
-                if (!this.active(this.exitOrder)) await this.placeOrder(role, quote.leg, quote.side, quote.price, quote.size);
+                const size = this.cfg.mode === "dynamic-range-final-managed" ? Math.min(quote.size, this.availableShares(quote.leg)) : quote.size;
+                if (!this.active(this.exitOrder) && size > 1e-9) await this.placeOrder(role, quote.leg, quote.side, quote.price, size);
             }
-            this.recordDecision(now, secondsLeft, up, down, btcPrice, decision.reason, decision.quotes);
+            this.recordDecision(now, secondsLeft, up, down, btcPrice, decision.reason, decision.quotes, combinedDecision?.component);
         } finally { this.evaluating = false; }
     }
 
     private active(order: TrackedOrder | null): boolean { return Boolean(order && !isFinal(order.status)); }
 
     private position(leg: Leg): { shares: number; cost: number; tookProfit: boolean } {
-        if (!this.accounting || this.accounting.entryLeg !== leg) return { shares: 0, cost: 0, tookProfit: false };
-        const shares = Math.max(0, this.accounting.shares - this.accounting.soldShares);
+        if (!this.accounting) return { shares: 0, cost: 0, tookProfit: false };
+        const bought = leg === "UP" ? this.accounting.sharesUp : this.accounting.sharesDown;
+        const sold = leg === "UP" ? this.accounting.soldUp : this.accounting.soldDown;
+        const shares = Math.max(0, bought - sold);
         const averagePrice = this.accounting.shares > 0 ? this.accounting.cost / this.accounting.shares : 0;
         return { shares, cost: shares * averagePrice, tookProfit: Boolean(this.state.exited) };
+    }
+
+    private availableShares(leg: Leg): number {
+        if (!this.accounting) return 0;
+        return leg === "UP"
+            ? Math.max(0, this.accounting.sharesUp - this.accounting.soldUp)
+            : Math.max(0, this.accounting.sharesDown - this.accounting.soldDown);
     }
 
     private async placeOrder(role: Role, leg: Leg, side: "BUY" | "SELL", price: number, size: number): Promise<void> {
@@ -364,7 +424,11 @@ class LatencyScalpBot {
             const order = { ...base, orderId } satisfies TrackedOrder;
             if (side === "BUY") this.entryOrder = order; else this.exitOrder = order;
             logger.info(`Posted ${role} ${side} ${leg} ${size.toFixed(4)} @ ${price.toFixed(2)}`); this.recordOrder("order_posted", order);
-        } catch (error) { logger.error(`Failed to post ${role}: ${error instanceof Error ? error.message : String(error)}`); if ((this.cfg.mode === "final-30-high" || this.cfg.mode === "final-30-managed") && role === "entry") this.state = { ...this.state, cancelled: true }; }
+        } catch (error) {
+            logger.error(`Failed to post ${role}: ${error instanceof Error ? error.message : String(error)}`);
+            if ((this.cfg.mode === "final-30-high" || this.cfg.mode === "final-30-managed") && role === "entry") this.state = { ...this.state, cancelled: true };
+            if (this.cfg.mode === "dynamic-range-final-managed" && role === "final-entry") this.finalBlocked = true;
+        }
     }
 
     private async fillDryOrders(now: number, upAsk: number, downAsk: number, upBid?: number, downBid?: number): Promise<void> {
@@ -403,21 +467,32 @@ class LatencyScalpBot {
         if (!this.accounting) return;
         if (order.side === "BUY") {
             this.accounting.entryLeg = order.leg; this.accounting.cost += shares * executionPrice; this.accounting.shares += shares;
+            if (order.leg === "UP") this.accounting.sharesUp += shares;
+            else this.accounting.sharesDown += shares;
             this.state = { ...this.state, filled: true, filledAtMs: this.state.filledAtMs ?? Date.now(), fillBtcPrice: this.lastBtcPrice, filledShares: this.accounting.shares - this.accounting.soldShares };
-            if (this.cfg.mode === "final-30-managed") {
+            if (this.cfg.mode === "dynamic-range-final-managed" && order.role === "dynamic-entry") {
+                this.dynamicState = { ...this.dynamicState, entryLeg: order.leg, entryPrice: executionPrice, entryShares: shares, entryAtMs: Date.now(), candidateLeg: undefined, candidateSinceMs: undefined };
+            } else if (this.cfg.mode === "dynamic-range-final-managed" && order.role === "dynamic-hedge") {
+                const pairedShares = (this.dynamicState.pairedShares ?? 0) + shares;
+                this.dynamicState = { ...this.dynamicState, pairedShares, paired: pairedShares + 1e-9 >= (this.dynamicState.entryShares ?? pairedShares) };
+            }
+            if (this.cfg.mode === "final-30-managed" || (this.cfg.mode === "dynamic-range-final-managed" && order.role === "final-entry")) {
                 this.managedPosition = {
                     leg: order.leg,
-                    entryPrice: this.accounting.cost / this.accounting.shares,
+                    entryPrice: executionPrice,
                     entryBtcPrice: this.managedPosition?.entryBtcPrice ?? this.lastBtcPrice,
-                    shares: this.accounting.shares - this.accounting.soldShares,
+                    shares,
                     exited: false,
                 };
             }
         } else {
             this.accounting.proceeds += shares * executionPrice; this.accounting.soldShares += shares;
+            if (order.leg === "UP") this.accounting.soldUp += shares;
+            else this.accounting.soldDown += shares;
             if (order.filledSize + 1e-9 >= order.size) {
                 this.state = { ...this.state, exited: true };
-                if (this.managedPosition) this.managedPosition = { ...this.managedPosition, exited: true, shares: Math.max(0, this.accounting.shares - this.accounting.soldShares) };
+                if (this.cfg.mode === "dynamic-range-final-managed" && !this.managedPosition) this.dynamicState = { ...this.dynamicState, exited: true };
+                if (this.managedPosition) this.managedPosition = { ...this.managedPosition, exited: true, shares: 0 };
             }
         }
     }
@@ -435,16 +510,17 @@ class LatencyScalpBot {
         const outcome = payload.winningOutcome.toUpperCase();
         const winner: Leg | undefined = payload.winningAssetId === accounting.tokens.upTokenId || outcome === "UP" ? "UP" : payload.winningAssetId === accounting.tokens.downTokenId || outcome === "DOWN" ? "DOWN" : undefined;
         if (!winner) return; accounting.resolved = true;
-        const remaining = Math.max(0, accounting.shares - accounting.soldShares);
-        const settlement = accounting.entryLeg === winner ? remaining : 0; const pnl = accounting.proceeds + settlement - accounting.cost;
+        const remainingUp = Math.max(0, accounting.sharesUp - accounting.soldUp);
+        const remainingDown = Math.max(0, accounting.sharesDown - accounting.soldDown);
+        const settlement = winner === "UP" ? remainingUp : remainingDown; const pnl = accounting.proceeds + settlement - accounting.cost;
         logger.info(`${this.cfg.mode} resolved ${accounting.tokens.slug}: winner=${winner}, pnl=${pnl.toFixed(4)}`);
         this.write({ row_type: "resolution", timestamp: new Date().toISOString(), timestamp_ms: Date.now(), slug: accounting.tokens.slug, condition_id: accounting.tokens.conditionId, dry_run: this.cfg.dryRun, winning_outcome: winner, entry_cost: accounting.cost.toFixed(6), exit_proceeds: accounting.proceeds.toFixed(6), settlement_payout: settlement.toFixed(6), pnl: pnl.toFixed(6) });
         this.accountingByAsset.delete(accounting.tokens.upTokenId); this.accountingByAsset.delete(accounting.tokens.downTokenId);
     }
 
-    private recordDecision(now: number, secondsLeft: number, up: any, down: any, btcPrice: number | undefined, reason: string | undefined, quotes: any[]): void {
+    private recordDecision(now: number, secondsLeft: number, up: any, down: any, btcPrice: number | undefined, reason: string | undefined, quotes: any[], component?: string): void {
         if (now - this.lastRecordAt < this.cfg.recordIntervalMs) return; this.lastRecordAt = now;
-        this.write({ row_type: "decision", timestamp: new Date(now).toISOString(), timestamp_ms: now, slug: this.tokens?.slug, condition_id: this.tokens?.conditionId, dry_run: this.cfg.dryRun, btc_price: optional(btcPrice, 2), open_price: optional(this.btcOpenPrice, 2), seconds_left: secondsLeft.toFixed(3), up_bid: optional(up.bestBid), up_ask: optional(up.bestAsk), down_bid: optional(down.bestBid), down_ask: optional(down.bestAsk), candidate_leg: this.state.candidateLeg, triggered_leg: this.state.triggeredLeg, state_filled: Boolean(this.state.filled), state_cancelled: Boolean(this.state.cancelled), state_exited: Boolean(this.state.exited), decision_reason: reason, quotes: quotes.map((quote) => `${quote.side} ${quote.leg}@${quote.price.toFixed(2)}x${quote.size.toFixed(4)}`).join("|") });
+        this.write({ row_type: "decision", timestamp: new Date(now).toISOString(), timestamp_ms: now, slug: this.tokens?.slug, condition_id: this.tokens?.conditionId, dry_run: this.cfg.dryRun, btc_price: optional(btcPrice, 2), open_price: optional(this.btcOpenPrice, 2), seconds_left: secondsLeft.toFixed(3), up_bid: optional(up.bestBid), up_ask: optional(up.bestAsk), down_bid: optional(down.bestBid), down_ask: optional(down.bestAsk), candidate_leg: this.state.candidateLeg, triggered_leg: this.state.triggeredLeg, state_filled: Boolean(this.state.filled), state_cancelled: Boolean(this.state.cancelled), state_exited: Boolean(this.state.exited), decision_reason: reason, quotes: quotes.map((quote) => `${quote.side} ${quote.leg}@${quote.price.toFixed(2)}x${quote.size.toFixed(4)}`).join("|"), strategy_component: component, dynamic_entry_leg: this.dynamicState.entryLeg, dynamic_paired: Boolean(this.dynamicState.paired), dynamic_exited: Boolean(this.dynamicState.exited), final_blocked: this.finalBlocked });
     }
 
     private recordOrder(rowType: string, order: TrackedOrder, executionPrice = order.price): void {
@@ -459,7 +535,7 @@ async function bootstrap(cfg: RunnerConfig): Promise<ClobClient> {
     if (!validatePrivateKey()) throw new Error("WALLET_PRIVATE_KEY is invalid or missing");
     await createCredential(); const client = await getClobClient();
     if (process.env.SKIP_ALLOWANCE_APPROVE !== "true") { try { await approveUSDCAllowance(); await updateClobBalanceAllowance(client); } catch (error) { logger.error(`Allowance approval failed: ${error instanceof Error ? error.message : String(error)}`); } }
-    const orderUsdc = cfg.mode === "deep-rebound" ? cfg.deepParams.orderUsdc : cfg.mode === "final-30-high" ? cfg.final30HighParams.orderShares * cfg.final30HighParams.maxEntryPrice : cfg.mode === "final-30-managed" ? cfg.final30ManagedParams.orderShares * cfg.final30ManagedParams.maxEntryPrice : cfg.params.orderUsdc;
+    const orderUsdc = cfg.mode === "deep-rebound" ? cfg.deepParams.orderUsdc : cfg.mode === "final-30-high" ? cfg.final30HighParams.orderShares * cfg.final30HighParams.maxEntryPrice : cfg.mode === "final-30-managed" ? cfg.final30ManagedParams.orderShares * cfg.final30ManagedParams.maxEntryPrice : cfg.mode === "dynamic-range-final-managed" ? Math.max(cfg.dynamicRangePullbackParams.orderShares * cfg.dynamicRangePullbackParams.latePairCost, cfg.final30ManagedParams.orderShares * cfg.final30ManagedParams.maxEntryPrice) : cfg.params.orderUsdc;
     const gate = await waitForMinimumUsdcBalance(client, Math.max(config.bot.minUsdcBalance, orderUsdc), { pollIntervalMs: 15_000, timeoutMs: 0, logEveryPoll: true });
     if (!gate.ok) throw new Error("USDC balance gate failed"); return client;
 }

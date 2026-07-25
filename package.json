@@ -16,6 +16,7 @@
     "btc5m:deep-rebound": "tsx src/btc-5m-deep-rebound.ts",
     "btc5m:final-30-high": "tsx src/btc-5m-final-30-high.ts",
     "btc5m:final-30-managed": "tsx src/btc-5m-final-30-managed.ts",
+    "btc5m:dynamic-range-final-managed": "tsx src/btc-5m-dynamic-range-final-managed.ts",
     "btc5m:hybrid": "tsx src/btc-5m-hybrid.ts",
     "backtest:btc5m": "tsx src/backtest/btc-5m-backtest.ts",
     "collect:btc5m-history": "tsx src/collect/btc-5m-history.ts",
