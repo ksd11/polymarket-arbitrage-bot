@@ -467,7 +467,7 @@ function loadConfig(): BacktestConfig {
         final30HighTriggerPrice: Number(getArgValue("--final-30-high-trigger") ?? envNumber(finalManaged ? "FINAL_30_MANAGED_TRIGGER_PRICE" : "FINAL_30_HIGH_TRIGGER_PRICE", 0.85)),
         final30HighEarlyTriggerPrice: Number(getArgValue("--final-30-high-early-trigger") ?? envNumber(finalManaged ? "FINAL_30_MANAGED_EARLY_TRIGGER_PRICE" : "FINAL_30_HIGH_EARLY_TRIGGER_PRICE", 0.90)),
         final30HighMaxEntryPrice: Number(getArgValue("--final-30-high-max-entry-price") ?? envNumber(finalManaged ? "FINAL_30_MANAGED_MAX_ENTRY_PRICE" : "FINAL_30_HIGH_MAX_ENTRY_PRICE", 0.90)),
-        final30HighOrderShares: Number(getArgValue("--final-30-high-shares") ?? envNumber(finalManaged ? "FINAL_30_MANAGED_ORDER_SHARES" : "FINAL_30_HIGH_ORDER_SHARES", 2)),
+        final30HighOrderShares: Number(getArgValue("--final-30-high-shares") ?? envNumber(finalManaged ? "FINAL_30_MANAGED_ORDER_SHARES" : "FINAL_30_HIGH_ORDER_SHARES", finalManaged ? 5 : 2)),
         final30HighMaxSecondsLeftToOpen: Number(getArgValue("--final-30-high-max-seconds-left") ?? envNumber(finalManaged ? "FINAL_30_MANAGED_MAX_SECONDS_LEFT_TO_OPEN" : "FINAL_30_HIGH_MAX_SECONDS_LEFT_TO_OPEN", 30)),
         final30HighEarlyMaxSecondsLeftToOpen: Number(getArgValue("--final-30-high-early-max-seconds-left") ?? envNumber(finalManaged ? "FINAL_30_MANAGED_EARLY_MAX_SECONDS_LEFT_TO_OPEN" : "FINAL_30_HIGH_EARLY_MAX_SECONDS_LEFT_TO_OPEN", 30)),
         final30HighMinSecondsLeftToOpen: Number(getArgValue("--final-30-high-min-seconds-left") ?? envNumber(finalManaged ? "FINAL_30_MANAGED_MIN_SECONDS_LEFT_TO_OPEN" : "FINAL_30_HIGH_MIN_SECONDS_LEFT_TO_OPEN", 0)),

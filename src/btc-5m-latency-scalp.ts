@@ -20,6 +20,7 @@ import { buildBtc5mDynamicRangeFinalManagedOrders, Btc5mDynamicRangeFinalManaged
 import { Btc5mRegimeSnapshot } from "./strategies/btc5m/regime";
 import { waitForMinimumUsdcBalance } from "./utils/balance";
 import { setupConsoleFileLogging } from "./utils/console-file";
+import { executionsForOrder, summarizeOrderExecutions } from "./utils/clob-order-reconciliation";
 import { addHoldings, removeHoldings } from "./utils/holdings";
 import { logger } from "./utils/logger";
 
@@ -36,6 +37,7 @@ type RunnerConfig = {
     evaluationIntervalMs: number;
     orderPollIntervalMs: number;
     orderRetryIntervalMs: number;
+    orderReconcileGraceMs: number;
     entryMaxAgeSeconds: number;
     marketLogIntervalMs: number;
     recordIntervalMs: number;
@@ -70,8 +72,12 @@ type TrackedOrder = {
     size: number;
     filledSize: number;
     accountedFilledSize: number;
+    accountedNotional: number;
     status: string;
     placedAtMs: number;
+    cancelledAtMs?: number;
+    accounting: Accounting;
+    executionIds: string[];
     dynamicEntryPlan?: Btc5mDynamicRangePairPlan;
 };
 
@@ -86,6 +92,7 @@ type Accounting = {
     sharesDown: number;
     soldUp: number;
     soldDown: number;
+    resolving?: boolean;
     resolved: boolean;
 };
 
@@ -94,7 +101,7 @@ const HEADERS = [
     "btc_price", "open_price", "seconds_left", "up_bid", "up_ask", "down_bid", "down_ask",
     "candidate_leg", "triggered_leg", "state_filled", "state_cancelled", "state_exited", "decision_reason", "quotes",
     "strategy_component", "dynamic_entry_leg", "dynamic_entry_shares", "dynamic_synthetic_sell", "dynamic_planned_exit_price", "dynamic_planned_hedge_price", "dynamic_planned_hedge_shares", "dynamic_planned_locked_profit", "dynamic_paired", "dynamic_exited", "final_blocked",
-    "event_role", "event_leg", "event_side", "event_price", "event_size", "event_cost", "order_id", "order_status", "filled_size", "event_error",
+    "event_role", "event_leg", "event_side", "event_price", "event_size", "event_cost", "event_notional", "execution_source", "execution_ids", "order_id", "order_status", "filled_size", "event_error",
     "winning_outcome", "entry_cost", "exit_proceeds", "settlement_payout", "pnl",
 ] as const;
 type RecordRow = Partial<Record<typeof HEADERS[number], string | number | boolean>>;
@@ -132,6 +139,7 @@ function loadConfig(): RunnerConfig {
         negRisk: envBool(`${prefix}_NEG_RISK`, config.copytrade.negRisk), evaluationIntervalMs: envNumber(`${prefix}_EVALUATION_INTERVAL_MS`, deep ? 250 : 100),
         orderPollIntervalMs: envNumber(`${prefix}_ORDER_POLL_INTERVAL_MS`, deep ? 500 : 250), marketLogIntervalMs: envNumber(`${prefix}_MARKET_LOG_INTERVAL_MS`, 1000),
         orderRetryIntervalMs: envNumber(`${prefix}_ORDER_RETRY_INTERVAL_MS`, 1_000), entryMaxAgeSeconds: envNumber(`${prefix}_ENTRY_MAX_AGE_SECONDS`, 2),
+        orderReconcileGraceMs: envNumber(`${prefix}_ORDER_RECONCILE_GRACE_MS`, 5_000),
         recordIntervalMs: envNumber(`${prefix}_RECORD_INTERVAL_MS`, 1000), btcPriceRefreshMs: envNumber(`${prefix}_BTC_PRICE_REFRESH_MS`, Math.min(250, btc.refreshIntervalMs)),
         btcPriceMaxStaleMs: envNumber(`${prefix}_BTC_PRICE_MAX_STALE_MS`, btc.maxStalenessMs), btcPriceUrls: parseList(envString(`${prefix}_BTC_PRICE_URLS`, btc.urls.join("|"))),
         recordEnabled: envBool(`${prefix}_RECORD_ENABLED`, true), recordPath: resolve(envString(`${prefix}_RECORD_FILE`, `data/btc5m-${mode}-live.csv`)),
@@ -181,7 +189,7 @@ function loadConfig(): RunnerConfig {
             triggerPrice: envNumber("FINAL_30_MANAGED_TRIGGER_PRICE", envNumber("FINAL_30_HIGH_TRIGGER_PRICE", 0.85)),
             earlyTriggerPrice: envNumber("FINAL_30_MANAGED_EARLY_TRIGGER_PRICE", envNumber("FINAL_30_HIGH_EARLY_TRIGGER_PRICE", 0.90)),
             maxEntryPrice: envNumber("FINAL_30_MANAGED_MAX_ENTRY_PRICE", envNumber("FINAL_30_HIGH_MAX_ENTRY_PRICE", 0.90)),
-            orderShares: envNumber("FINAL_30_MANAGED_ORDER_SHARES", 2),
+            orderShares: envNumber("FINAL_30_MANAGED_ORDER_SHARES", 5),
             maxSecondsLeftToOpen: envNumber("FINAL_30_MANAGED_MAX_SECONDS_LEFT_TO_OPEN", envNumber("FINAL_30_HIGH_MAX_SECONDS_LEFT_TO_OPEN", 30)),
             earlyMaxSecondsLeftToOpen: envNumber("FINAL_30_MANAGED_EARLY_MAX_SECONDS_LEFT_TO_OPEN", envNumber("FINAL_30_HIGH_EARLY_MAX_SECONDS_LEFT_TO_OPEN", 30)),
             minSecondsLeftToOpen: envNumber("FINAL_30_MANAGED_MIN_SECONDS_LEFT_TO_OPEN", envNumber("FINAL_30_HIGH_MIN_SECONDS_LEFT_TO_OPEN", 0)),
@@ -258,6 +266,7 @@ class LatencyScalpBot {
     private lastBtcPrice?: number;
     private entryOrder: TrackedOrder | null = null;
     private exitOrder: TrackedOrder | null = null;
+    private trackedOrders = new Map<string, TrackedOrder>();
     private accounting: Accounting | null = null;
     private accountingByAsset = new Map<string, Accounting>();
     private timers: NodeJS.Timeout[] = [];
@@ -267,6 +276,7 @@ class LatencyScalpBot {
     private stopped = false;
     private lastRecordAt = 0;
     private nextOrderAttemptAt = 0;
+    private executionVersion = 0;
 
     constructor(private client: ClobClient, private cfg: RunnerConfig) {
         this.btc = new BtcPriceProvider({ urls: cfg.btcPriceUrls, refreshIntervalMs: cfg.btcPriceRefreshMs, maxStalenessMs: cfg.btcPriceMaxStaleMs });
@@ -288,7 +298,7 @@ class LatencyScalpBot {
         await this.btc.start();
         this.ws = new WebSocketOrderBook("market", [], null, this.cfg.marketLogIntervalMs);
         await this.ws.connect();
-        this.ws.onMarketResolved((payload) => this.handleResolution(payload));
+        this.ws.onMarketResolved((payload) => void this.handleResolution(payload));
         await this.initializeCycle();
         this.timers.push(setInterval(() => void this.cycleTick(), 1_000));
         this.timers.push(setInterval(() => void this.evaluate(), this.cfg.evaluationIntervalMs));
@@ -384,6 +394,7 @@ class LatencyScalpBot {
                 if (!wasCancelled && this.state.cancelled) await this.cancelOrder(this.entryOrder, decision.reason || "strategy cancelled");
             }
             if ((this.cfg.mode === "final-30-high" || this.cfg.mode === "final-30-managed") && decision.reason?.includes("blocked:")) this.state = { ...this.state, cancelled: true };
+            const decisionExecutionVersion = this.executionVersion;
             const quote = decision.quotes[0];
             if (this.cfg.mode === "deep-rebound" && quote?.side !== "BUY" && !this.state.filled && this.active(this.entryOrder)) {
                 await this.cancelOrder(this.entryOrder, "deep-rebound signal disappeared");
@@ -398,8 +409,12 @@ class LatencyScalpBot {
                 const entryExpired = (this.entryOrder!.role === "dynamic-entry" || this.entryOrder!.role === "final-entry") && orderAgeSeconds >= this.cfg.entryMaxAgeSeconds;
                 if (hedgeChanged || entryExpired) await this.cancelOrder(this.entryOrder, hedgeChanged ? "combined hedge quote changed" : "combined entry expired");
             }
+            if (this.executionVersion !== decisionExecutionVersion) {
+                this.recordDecision(now, secondsLeft, up, down, btcPrice, "execution changed while reconciling; recompute next tick", [], combinedDecision?.component);
+                return;
+            }
             const canBuy = this.cfg.mode === "dynamic-range-final-managed" ? !this.managedPosition : !this.state.exited;
-            if (quote?.side === "BUY" && canBuy && !this.active(this.entryOrder) && now >= this.nextOrderAttemptAt) {
+            if (quote?.side === "BUY" && canBuy && !this.active(this.entryOrder) && !this.pendingReconciliation("BUY") && now >= this.nextOrderAttemptAt) {
                 const role: Role = this.cfg.mode !== "dynamic-range-final-managed" ? "entry" : combinedDecision?.component === "final" ? "final-entry" : this.dynamicState.entryLeg ? "dynamic-hedge" : "dynamic-entry";
                 await this.placeOrder(role, quote.leg, quote.side, quote.price, quote.size, role === "dynamic-entry" ? combinedDecision?.dynamicEntryPlan : undefined);
             }
@@ -408,13 +423,18 @@ class LatencyScalpBot {
                 const role: Role = quote.note?.includes("take profit") || quote.note?.includes("take-profit") ? "take-profit" : "risk-exit";
                 if (this.active(this.exitOrder) && (this.exitOrder!.role !== role || Math.abs(this.exitOrder!.price - quote.price) > 1e-9)) await this.cancelOrder(this.exitOrder, "exit quote changed");
                 const size = this.cfg.mode === "dynamic-range-final-managed" ? Math.min(quote.size, this.availableShares(quote.leg)) : quote.size;
-                if (!this.active(this.exitOrder) && size > 1e-9 && now >= this.nextOrderAttemptAt) await this.placeOrder(role, quote.leg, quote.side, quote.price, size);
+                if (!this.active(this.exitOrder) && !this.pendingReconciliation("SELL") && size > 1e-9 && now >= this.nextOrderAttemptAt) await this.placeOrder(role, quote.leg, quote.side, quote.price, size);
             }
             this.recordDecision(now, secondsLeft, up, down, btcPrice, decision.reason, decision.quotes, combinedDecision?.component);
         } finally { this.evaluating = false; }
     }
 
     private active(order: TrackedOrder | null): boolean { return Boolean(order && !isFinal(order.status)); }
+
+    private pendingReconciliation(side: "BUY" | "SELL"): boolean {
+        const now = Date.now();
+        return [...this.trackedOrders.values()].some((order) => order.side === side && order.cancelledAtMs !== undefined && now - order.cancelledAtMs < this.cfg.orderReconcileGraceMs && order.accountedFilledSize + 1e-9 < order.size);
+    }
 
     private position(leg: Leg): { shares: number; cost: number; tookProfit: boolean } {
         if (!this.accounting) return { shares: 0, cost: 0, tookProfit: false };
@@ -433,11 +453,12 @@ class LatencyScalpBot {
     }
 
     private async placeOrder(role: Role, leg: Leg, side: "BUY" | "SELL", price: number, size: number, dynamicEntryPlan?: Btc5mDynamicRangePairPlan): Promise<void> {
-        if (!this.tokens) return;
+        if (!this.tokens || !this.accounting) return;
         const tokenId = leg === "UP" ? this.tokens.upTokenId : this.tokens.downTokenId;
-        const base = { role, leg, side, tokenId, price, size, filledSize: 0, accountedFilledSize: 0, status: "NEW", placedAtMs: Date.now(), dynamicEntryPlan };
+        const base = { role, leg, side, tokenId, price, size, filledSize: 0, accountedFilledSize: 0, accountedNotional: 0, status: "NEW", placedAtMs: Date.now(), accounting: this.accounting, executionIds: [], dynamicEntryPlan };
         if (this.cfg.dryRun) {
             const order = { ...base, orderId: `dry-${role}-${Date.now()}` } satisfies TrackedOrder;
+            this.trackedOrders.set(order.orderId, order);
             if (side === "BUY") this.entryOrder = order; else this.exitOrder = order;
             this.recordOrder("dry_run_order_posted", order); return;
         }
@@ -446,6 +467,7 @@ class LatencyScalpBot {
             const orderId = response?.orderID ?? response?.orderId;
             if (!orderId || response?.success === false) throw new Error(String(response?.errorMsg ?? response?.status ?? "CLOB returned no orderID"));
             const order = { ...base, orderId } satisfies TrackedOrder;
+            this.trackedOrders.set(order.orderId, order);
             if (side === "BUY") this.entryOrder = order; else this.exitOrder = order;
             this.nextOrderAttemptAt = 0;
             logger.info(`Posted ${role} ${side} ${leg} ${size.toFixed(4)} @ ${price.toFixed(2)}`); this.recordOrder("order_posted", order);
@@ -472,31 +494,35 @@ class LatencyScalpBot {
         if (this.cfg.dryRun || this.stopped || this.evaluating || this.polling) return;
         this.polling = true;
         try {
-            for (const order of [this.entryOrder, this.exitOrder]) {
+            const orders = [...this.trackedOrders.values()].filter((order) => this.active(order) || (order.cancelledAtMs !== undefined && Date.now() - order.cancelledAtMs < this.cfg.orderReconcileGraceMs));
+            await this.reconcileTradesForOrders(orders);
+            for (const order of orders) {
                 if (!this.active(order)) continue;
                 try {
-                    const latest = await this.client.getOrder(order!.orderId); if (!latest) continue;
-                    this.reconcileOrder(order!, latest, "order_fill");
-                    if (order!.filledSize > 0 && order!.filledSize + 1e-9 < order!.size && order!.role !== "dynamic-hedge") await this.cancelOrder(order, "partial fill; cancel remainder");
+                    const latest = await this.client.getOrder(order.orderId); if (!latest) continue;
+                    this.reconcileOrder(order, latest, "order_fill");
+                    if (order.filledSize > 0 && order.filledSize + 1e-9 < order.size && order.role !== "dynamic-hedge") await this.cancelOrder(order, "partial fill; cancel remainder");
                 } catch (error) { logger.error(`Failed to poll order: ${formatError(error)}`); }
             }
+            this.cleanupTrackedOrders();
         } finally {
             this.polling = false;
         }
     }
 
     private fillOrder(order: TrackedOrder, shares: number, event: string, executionPrice: number): void {
-        order.filledSize += shares; order.accountedFilledSize += shares; order.status = "FILLED"; this.accountFill(order, shares, executionPrice); this.recordOrder(event, order, executionPrice);
+        order.filledSize += shares; order.accountedFilledSize += shares; order.accountedNotional += shares * executionPrice; order.status = "FILLED"; this.accountFill(order, shares, executionPrice); this.recordOrder(event, order, executionPrice, shares * executionPrice, "simulation");
     }
 
     private accountFill(order: TrackedOrder, shares: number, executionPrice: number): void {
-        if (!this.accounting) return;
+        const accounting = order.accounting;
         if (order.side === "BUY") {
-            this.accounting.entryLeg = order.leg; this.accounting.cost += shares * executionPrice; this.accounting.shares += shares;
-            if (order.leg === "UP") this.accounting.sharesUp += shares;
-            else this.accounting.sharesDown += shares;
-            if (!this.cfg.dryRun) addHoldings(this.accounting.tokens.conditionId, order.tokenId, shares);
-            this.state = { ...this.state, filled: true, filledAtMs: this.state.filledAtMs ?? Date.now(), fillBtcPrice: this.lastBtcPrice, filledShares: this.accounting.shares - this.accounting.soldShares };
+            accounting.entryLeg = order.leg; accounting.cost += shares * executionPrice; accounting.shares += shares;
+            if (order.leg === "UP") accounting.sharesUp += shares;
+            else accounting.sharesDown += shares;
+            if (!this.cfg.dryRun) addHoldings(accounting.tokens.conditionId, order.tokenId, shares);
+            if (accounting !== this.accounting) return;
+            this.state = { ...this.state, filled: true, filledAtMs: this.state.filledAtMs ?? Date.now(), fillBtcPrice: this.lastBtcPrice, filledShares: accounting.shares - accounting.soldShares };
             if (this.cfg.mode === "dynamic-range-final-managed" && order.role === "dynamic-entry") {
                 const entryShares = (this.dynamicState.entryShares ?? 0) + shares;
                 const plannedHedgePrice = order.dynamicEntryPlan?.hedgePrice;
@@ -537,10 +563,11 @@ class LatencyScalpBot {
                 };
             }
         } else {
-            this.accounting.proceeds += shares * executionPrice; this.accounting.soldShares += shares;
-            if (order.leg === "UP") this.accounting.soldUp += shares;
-            else this.accounting.soldDown += shares;
-            if (!this.cfg.dryRun) removeHoldings(this.accounting.tokens.conditionId, order.tokenId, shares);
+            accounting.proceeds += shares * executionPrice; accounting.soldShares += shares;
+            if (order.leg === "UP") accounting.soldUp += shares;
+            else accounting.soldDown += shares;
+            if (!this.cfg.dryRun) removeHoldings(accounting.tokens.conditionId, order.tokenId, shares);
+            if (accounting !== this.accounting) return;
             if (order.filledSize + 1e-9 >= order.size) {
                 this.state = { ...this.state, exited: true };
                 if (this.cfg.mode === "dynamic-range-final-managed" && !this.managedPosition) this.dynamicState = { ...this.dynamicState, exited: true };
@@ -551,32 +578,90 @@ class LatencyScalpBot {
 
     private async cancelOrder(order: TrackedOrder | null, reason: string): Promise<void> {
         if (!this.active(order)) return;
-        if (this.cfg.dryRun) { order!.status = "CANCELLED"; this.recordOrder("dry_run_order_cancelled", order!); return; }
+        if (this.cfg.dryRun) { order!.status = "CANCELLED"; order!.cancelledAtMs = Date.now(); this.recordOrder("dry_run_order_cancelled", order!); return; }
         try {
             await this.client.cancelOrder({ orderID: order!.orderId });
             const latest = await this.client.getOrder(order!.orderId).catch(() => undefined);
             if (latest) this.reconcileOrder(order!, latest, "order_fill_during_cancel");
             if (!isFinal(order!.status)) order!.status = "CANCELLED";
+            order!.cancelledAtMs = Date.now();
             this.recordOrder("order_cancelled", order!); logger.info(`Cancelled ${order!.role} (${reason})`);
         } catch (error) { logger.error(`Failed to cancel ${order!.role}: ${formatError(error)}`); }
     }
 
     private reconcileOrder(order: TrackedOrder, latest: any, fillEvent: string): void {
         order.status = String(latest?.status || order.status);
-        order.filledSize = orderFilledSize(latest);
+        order.filledSize = Math.max(order.filledSize, orderFilledSize(latest));
         const newlyFilled = Math.max(0, order.filledSize - order.accountedFilledSize);
         if (newlyFilled <= 0) return;
         order.accountedFilledSize = order.filledSize;
+        order.accountedNotional += newlyFilled * order.price;
         this.accountFill(order, newlyFilled, order.price);
-        this.recordOrder(fillEvent, order);
+        this.executionVersion += 1;
+        this.recordOrder(fillEvent, order, order.price, newlyFilled * order.price, "order-status");
     }
 
-    private handleResolution(payload: MarketResolvedPayload): void {
+    private async reconcileTradesForOrders(orders: TrackedOrder[], onlyFirstPage = true): Promise<void> {
+        const byMarket = new Map<string, TrackedOrder[]>();
+        for (const order of orders) {
+            const market = order.accounting.tokens.conditionId;
+            const marketOrders = byMarket.get(market) ?? [];
+            marketOrders.push(order);
+            byMarket.set(market, marketOrders);
+        }
+        for (const [market, marketOrders] of byMarket) {
+            try {
+                const trades = await this.client.getTrades({ market }, onlyFirstPage);
+                for (const order of marketOrders) {
+                    const summary = summarizeOrderExecutions(executionsForOrder(trades, order.orderId));
+                    if (summary.shares <= 0) continue;
+                    const newlyFilled = Math.max(0, summary.shares - order.accountedFilledSize);
+                    if (newlyFilled > 1e-9) {
+                        const newNotional = Math.max(0, summary.notional - order.accountedNotional);
+                        const executionPrice = newNotional / newlyFilled;
+                        order.accountedFilledSize += newlyFilled;
+                        order.accountedNotional += newNotional;
+                        order.filledSize = Math.max(order.filledSize, summary.shares);
+                        this.accountFill(order, newlyFilled, executionPrice);
+                        this.executionVersion += 1;
+                        this.recordOrder("order_trade_fill", order, executionPrice, newNotional, "trades-api", summary.executionIds);
+                    }
+                    if (summary.shares + 1e-9 >= order.accountedFilledSize) {
+                        const correction = summary.notional - order.accountedNotional;
+                        if (Math.abs(correction) > 1e-9) {
+                            if (order.side === "BUY") order.accounting.cost += correction;
+                            else order.accounting.proceeds += correction;
+                            order.accountedNotional = summary.notional;
+                            this.executionVersion += 1;
+                            this.recordOrder("order_trade_correction", order, summary.averagePrice ?? order.price, correction, "trades-api", summary.executionIds);
+                        }
+                    }
+                    order.executionIds = summary.executionIds;
+                    if (summary.shares + 1e-9 >= order.size) order.status = "FILLED";
+                }
+            } catch (error) {
+                logger.error(`Failed to reconcile trades for ${market}: ${formatError(error)}`);
+            }
+        }
+    }
+
+    private cleanupTrackedOrders(): void {
+        const now = Date.now();
+        for (const [orderId, order] of this.trackedOrders) {
+            const reconciliationExpired = now - (order.cancelledAtMs ?? order.placedAtMs) >= this.cfg.orderReconcileGraceMs;
+            if (order.accounting.resolved && !this.active(order) && reconciliationExpired) this.trackedOrders.delete(orderId);
+        }
+    }
+
+    private async handleResolution(payload: MarketResolvedPayload): Promise<void> {
         const accounting = this.accountingByAsset.get(payload.winningAssetId) ?? payload.assetIds.map((id) => this.accountingByAsset.get(id)).find(Boolean);
-        if (!accounting || accounting.resolved) return;
+        if (!accounting || accounting.resolved || accounting.resolving) return;
+        accounting.resolving = true;
+        await this.reconcileTradesForOrders([...this.trackedOrders.values()].filter((order) => order.accounting === accounting), false);
         const outcome = payload.winningOutcome.toUpperCase();
         const winner: Leg | undefined = payload.winningAssetId === accounting.tokens.upTokenId || outcome === "UP" ? "UP" : payload.winningAssetId === accounting.tokens.downTokenId || outcome === "DOWN" ? "DOWN" : undefined;
-        if (!winner) return; accounting.resolved = true;
+        if (!winner) { accounting.resolving = false; return; }
+        accounting.resolved = true; accounting.resolving = false;
         const remainingUp = Math.max(0, accounting.sharesUp - accounting.soldUp);
         const remainingDown = Math.max(0, accounting.sharesDown - accounting.soldDown);
         const settlement = winner === "UP" ? remainingUp : remainingDown; const pnl = accounting.proceeds + settlement - accounting.cost;
@@ -590,8 +675,8 @@ class LatencyScalpBot {
         this.write({ row_type: "decision", timestamp: new Date(now).toISOString(), timestamp_ms: now, slug: this.tokens?.slug, condition_id: this.tokens?.conditionId, dry_run: this.cfg.dryRun, btc_price: optional(btcPrice, 2), open_price: optional(this.btcOpenPrice, 2), seconds_left: secondsLeft.toFixed(3), up_bid: optional(up.bestBid), up_ask: optional(up.bestAsk), down_bid: optional(down.bestBid), down_ask: optional(down.bestAsk), candidate_leg: this.state.candidateLeg, triggered_leg: this.state.triggeredLeg, state_filled: Boolean(this.state.filled), state_cancelled: Boolean(this.state.cancelled), state_exited: Boolean(this.state.exited), decision_reason: reason, quotes: quotes.map((quote) => `${quote.side} ${quote.leg}@${quote.price.toFixed(2)}x${quote.size.toFixed(4)}`).join("|"), strategy_component: component, dynamic_entry_leg: this.dynamicState.entryLeg, dynamic_entry_shares: optional(this.dynamicState.entryShares, 4), dynamic_synthetic_sell: Boolean(this.dynamicState.syntheticSell), dynamic_planned_exit_price: optional(this.dynamicState.plannedExitPrice, 2), dynamic_planned_hedge_price: optional(this.dynamicState.plannedHedgePrice, 2), dynamic_planned_hedge_shares: optional(this.dynamicState.plannedHedgeShares, 4), dynamic_planned_locked_profit: optional(this.dynamicState.plannedLockedProfit, 4), dynamic_paired: Boolean(this.dynamicState.paired), dynamic_exited: Boolean(this.dynamicState.exited), final_blocked: this.finalBlocked });
     }
 
-    private recordOrder(rowType: string, order: TrackedOrder, executionPrice = order.price): void {
-        this.write({ row_type: rowType, timestamp: new Date().toISOString(), timestamp_ms: Date.now(), slug: this.tokens?.slug, condition_id: this.tokens?.conditionId, dry_run: this.cfg.dryRun, event_role: order.role, event_leg: order.leg, event_side: order.side, event_price: executionPrice.toFixed(6), event_size: order.size.toFixed(6), event_cost: (executionPrice * order.size).toFixed(6), order_id: order.orderId, order_status: order.status, filled_size: order.filledSize.toFixed(6) });
+    private recordOrder(rowType: string, order: TrackedOrder, executionPrice = order.price, eventNotional?: number, executionSource?: string, executionIds = order.executionIds): void {
+        this.write({ row_type: rowType, timestamp: new Date().toISOString(), timestamp_ms: Date.now(), slug: order.accounting.tokens.slug, condition_id: order.accounting.tokens.conditionId, dry_run: this.cfg.dryRun, event_role: order.role, event_leg: order.leg, event_side: order.side, event_price: executionPrice.toFixed(6), event_size: order.size.toFixed(6), event_cost: (executionPrice * order.size).toFixed(6), event_notional: optional(eventNotional), execution_source: executionSource, execution_ids: executionIds.join("|"), order_id: order.orderId, order_status: order.status, filled_size: order.filledSize.toFixed(6) });
     }
 
     private write(row: RecordRow): void { if (this.cfg.recordEnabled) appendRecord(this.cfg.recordPath, row); }
