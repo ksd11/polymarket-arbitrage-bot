@@ -11,6 +11,9 @@ export type Btc5mFinal30ManagedPosition = {
 };
 
 export type Btc5mFinal30ManagedParams = Btc5mFinal30HighParams & {
+    earlyBtcMinMoveUsd: number;
+    earlyBtcMinAsk: number;
+    earlyBtcMaxSecondsLeftToOpen: number;
     takeProfitDelta: number;
     stopLossDelta: number;
     stopMinBtcReversalBps: number;
@@ -38,6 +41,8 @@ export type Btc5mFinal30ManagedDecision = Btc5mStrategyDecision & {
 
 export function buildBtc5mFinal30ManagedOrders(input: Btc5mFinal30ManagedInput): Btc5mFinal30ManagedDecision {
     if (!input.position) {
+        const earlyDecision = buildEarlyBtcEntry(input);
+        if (earlyDecision) return earlyDecision;
         return buildBtc5mFinal30HighOrders({
             timestampMs: input.timestampMs,
             endMs: input.endMs,
@@ -81,6 +86,21 @@ export function buildBtc5mFinal30ManagedOrders(input: Btc5mFinal30ManagedInput):
         };
     }
     return { quotes: [], position, reason: `final-30-managed confirming stop ${confirmedSeconds.toFixed(1)}s` };
+}
+
+function buildEarlyBtcEntry(input: Btc5mFinal30ManagedInput): Btc5mFinal30ManagedDecision | undefined {
+    if (input.blocked || input.params.earlyBtcMinMoveUsd <= 0 || !input.openPrice || !input.btcPrice) return undefined;
+    const secondsLeft = Math.max(0, (input.endMs - input.timestampMs) / 1000);
+    if (secondsLeft <= input.params.maxSecondsLeftToOpen || secondsLeft > input.params.earlyBtcMaxSecondsLeftToOpen) return undefined;
+    const moveUsd = input.btcPrice - input.openPrice;
+    if (Math.abs(moveUsd) < input.params.earlyBtcMinMoveUsd) return undefined;
+    const leg: Btc5mLeg = moveUsd > 0 ? "UP" : "DOWN";
+    const ask = leg === "UP" ? input.upAsk : input.downAsk;
+    if (ask === undefined || ask < input.params.earlyBtcMinAsk || ask > input.params.maxEntryPrice) return undefined;
+    return {
+        quotes: [{ key: `${leg}:BUY`, leg, side: "BUY", price: ask, size: input.params.orderShares, note: `final-30-managed early-btc entry move=$${Math.abs(moveUsd).toFixed(2)} ask=${ask.toFixed(2)}` }],
+        reason: `final-30-managed early BTC ${leg} signal`,
+    };
 }
 
 function directionalBtcReversalBps(leg: Btc5mLeg, entryPrice?: number, currentPrice?: number): number {

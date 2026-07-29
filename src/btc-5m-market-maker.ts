@@ -15,12 +15,15 @@ import { waitForMinimumUsdcBalance } from "./utils/balance";
 import { logger } from "./utils/logger";
 import { setupConsoleFileLogging } from "./utils/console-file";
 import { buildBtc5mMarketMakerQuotes } from "./strategies/btc5m/market-maker";
+import { buildBtc5mConditionalMarketMakerQuotes, Btc5mConditionalMarketMakerParams, Btc5mConditionalMarketMakerSample } from "./strategies/btc5m/conditional-market-maker";
+import { BtcPriceProvider, defaultBtcPriceConfig } from "./providers/btcPriceProvider";
 
 type Leg = "UP" | "DOWN";
 type QuoteSide = "BUY" | "SELL";
 type OrderKey = `${Leg}:${QuoteSide}`;
 
 type MarketMakerConfig = {
+    mode: "standard" | "conditional";
     dryRun: boolean;
     market: string;
     intervalMinutes: number;
@@ -38,6 +41,10 @@ type MarketMakerConfig = {
     quoteIntervalMs: number;
     pollIntervalMs: number;
     enableSellExcess: boolean;
+    btcPriceUrls: string[];
+    btcPriceRefreshMs: number;
+    btcPriceMaxStaleMs: number;
+    conditional: Btc5mConditionalMarketMakerParams;
 };
 
 type MarketTokens = {
@@ -90,14 +97,23 @@ function envBool(name: string, fallback: boolean): boolean {
     return raw.toLowerCase() === "true";
 }
 
+function envList(name: string, fallback: string[]): string[] {
+    const raw = process.env[name]?.trim();
+    return raw ? raw.split("|").map((value) => value.trim()).filter(Boolean) : fallback;
+}
+
 function loadMarketMakerConfig(): MarketMakerConfig {
+    const mode = envString("BTC5M_MARKET_MAKER_MODE", "standard").toLowerCase();
+    if (mode !== "standard" && mode !== "conditional") throw new Error("BTC5M_MARKET_MAKER_MODE must be standard or conditional");
+    const btcDefaults = defaultBtcPriceConfig();
     const cfg: MarketMakerConfig = {
+        mode,
         dryRun: envBool("MM_DRY_RUN", true),
         market: envString("MM_MARKET", envString("BTC5M_MARKET", "btc")).toLowerCase(),
         intervalMinutes: envNumber("MM_INTERVAL_MINUTES", envNumber("BTC5M_INTERVAL_MINUTES", 5)),
         quoteShares: envNumber("MM_QUOTE_SHARES", 5),
-        maxUsdcPerLeg: envNumber("MM_MAX_USDC_PER_LEG", 0),
-        maxInventoryShares: envNumber("MM_MAX_INVENTORY_SHARES", 30),
+        maxUsdcPerLeg: mode === "conditional" ? envNumber("CONDITIONAL_MM_MAX_USDC_PER_LEG", 5) : envNumber("MM_MAX_USDC_PER_LEG", 0),
+        maxInventoryShares: mode === "conditional" ? envNumber("CONDITIONAL_MM_MAX_INVENTORY_SHARES", 10) : envNumber("MM_MAX_INVENTORY_SHARES", 30),
         quoteSpread: envNumber("MM_QUOTE_SPREAD", 0.06),
         minLockedEdge: envNumber("MM_MIN_LOCKED_EDGE", 0.02),
         inventorySkewPerShare: envNumber("MM_INVENTORY_SKEW_PER_SHARE", 0.002),
@@ -109,6 +125,24 @@ function loadMarketMakerConfig(): MarketMakerConfig {
         quoteIntervalMs: envNumber("MM_QUOTE_INTERVAL_MS", 1000),
         pollIntervalMs: envNumber("MM_POLL_INTERVAL_MS", 2000),
         enableSellExcess: envBool("MM_ENABLE_SELL_EXCESS", true),
+        btcPriceUrls: envList("CONDITIONAL_MM_BTC_PRICE_URLS", btcDefaults.urls),
+        btcPriceRefreshMs: envNumber("CONDITIONAL_MM_BTC_PRICE_REFRESH_MS", btcDefaults.refreshIntervalMs),
+        btcPriceMaxStaleMs: envNumber("CONDITIONAL_MM_BTC_PRICE_MAX_STALE_MS", btcDefaults.maxStalenessMs),
+        conditional: {
+            lookbackSeconds: envNumber("CONDITIONAL_MM_LOOKBACK_SECONDS", 15),
+            accelerationLookbackSeconds: envNumber("CONDITIONAL_MM_ACCELERATION_LOOKBACK_SECONDS", 2),
+            maxRangeBps: envNumber("CONDITIONAL_MM_MAX_RANGE_BPS", 15),
+            maxTrendBps: envNumber("CONDITIONAL_MM_MAX_TREND_BPS", 8),
+            maxTrendEfficiency: envNumber("CONDITIONAL_MM_MAX_TREND_EFFICIENCY", 0.65),
+            trendEfficiencyMinMomentumBps: envNumber("CONDITIONAL_MM_TREND_EFFICIENCY_MIN_MOMENTUM_BPS", 2),
+            maxAccelerationBps: envNumber("CONDITIONAL_MM_MAX_ACCELERATION_BPS", 4),
+            directionMinMomentumBps: envNumber("CONDITIONAL_MM_DIRECTION_MIN_MOMENTUM_BPS", 999),
+            favoredPriceImprove: envNumber("CONDITIONAL_MM_FAVORED_PRICE_IMPROVE", 0),
+            unfavoredPriceOffset: envNumber("CONDITIONAL_MM_UNFAVORED_PRICE_OFFSET", 0),
+            favoredSizeMultiplier: envNumber("CONDITIONAL_MM_FAVORED_SIZE_MULTIPLIER", 1),
+            unfavoredSizeMultiplier: envNumber("CONDITIONAL_MM_UNFAVORED_SIZE_MULTIPLIER", 1),
+            maxNetInventoryShares: envNumber("CONDITIONAL_MM_MAX_NET_INVENTORY_SHARES", 5),
+        },
     };
 
     if (cfg.intervalMinutes <= 0) throw new Error("MM_INTERVAL_MINUTES must be > 0");
@@ -123,6 +157,14 @@ function loadMarketMakerConfig(): MarketMakerConfig {
     if (cfg.cancelSecondsBeforeEnd < 0) throw new Error("MM_CANCEL_SECONDS_BEFORE_END must be >= 0");
     if (cfg.quoteIntervalMs <= 0) throw new Error("MM_QUOTE_INTERVAL_MS must be > 0");
     if (cfg.pollIntervalMs <= 0) throw new Error("MM_POLL_INTERVAL_MS must be > 0");
+    if (cfg.mode === "conditional") {
+        if (!cfg.btcPriceUrls.length) throw new Error("CONDITIONAL_MM_BTC_PRICE_URLS is required");
+        if (cfg.btcPriceRefreshMs <= 0 || cfg.btcPriceMaxStaleMs <= 0) throw new Error("Conditional market-maker BTC refresh settings must be > 0");
+        if (cfg.conditional.lookbackSeconds <= 0 || cfg.conditional.accelerationLookbackSeconds <= 0 || cfg.conditional.accelerationLookbackSeconds > cfg.conditional.lookbackSeconds) throw new Error("Invalid conditional market-maker lookback");
+        if (cfg.conditional.maxRangeBps <= 0 || cfg.conditional.maxTrendBps <= 0 || cfg.conditional.maxAccelerationBps <= 0 || cfg.conditional.trendEfficiencyMinMomentumBps < 0 || cfg.conditional.directionMinMomentumBps < 0) throw new Error("Invalid conditional market-maker BTC thresholds");
+        if (!(cfg.conditional.maxTrendEfficiency > 0 && cfg.conditional.maxTrendEfficiency <= 1)) throw new Error("CONDITIONAL_MM_MAX_TREND_EFFICIENCY must be between 0 and 1");
+        if (cfg.conditional.favoredPriceImprove < 0 || cfg.conditional.unfavoredPriceOffset < 0 || cfg.conditional.favoredSizeMultiplier <= 0 || cfg.conditional.unfavoredSizeMultiplier <= 0 || cfg.conditional.maxNetInventoryShares <= 0) throw new Error("Invalid conditional market-maker skew parameters");
+    }
     return cfg;
 }
 
@@ -204,15 +246,20 @@ class BtcFiveMinuteMarketMakerBot {
     private buyCostDown = 0;
     private realizedCost = 0;
     private readonly tick: number;
+    private readonly btcPrice: BtcPriceProvider | null;
+    private btcHistory: Btc5mConditionalMarketMakerSample[] = [];
+    private lastBtcSnapshotAt = 0;
 
     constructor(private client: ClobClient, private cfg: MarketMakerConfig) {
         this.tick = tickToNumber(cfg.tickSize);
+        this.btcPrice = cfg.mode === "conditional" ? new BtcPriceProvider({ urls: cfg.btcPriceUrls, refreshIntervalMs: cfg.btcPriceRefreshMs, maxStalenessMs: cfg.btcPriceMaxStaleMs }) : null;
     }
 
     async start(): Promise<void> {
         logger.info(
-            `Starting BTC 5m market maker: market=${this.cfg.market}, spread=${this.cfg.quoteSpread}, minEdge=${this.cfg.minLockedEdge}, shares=${this.cfg.quoteShares}, maxUsdcPerLeg=${this.cfg.maxUsdcPerLeg || "unlimited"}, dryRun=${this.cfg.dryRun}`
+            `Starting BTC 5m market maker: mode=${this.cfg.mode}, market=${this.cfg.market}, spread=${this.cfg.quoteSpread}, minEdge=${this.cfg.minLockedEdge}, shares=${this.cfg.quoteShares}, maxUsdcPerLeg=${this.cfg.maxUsdcPerLeg || "unlimited"}, dryRun=${this.cfg.dryRun}`
         );
+        if (this.btcPrice) await this.btcPrice.start();
         this.ws = new WebSocketOrderBook("market", [], null);
         await this.ws.connect();
         await this.initializeCurrentCycle();
@@ -228,6 +275,7 @@ class BtcFiveMinuteMarketMakerBot {
         this.timers = [];
         await this.cancelAllOpenOrders("shutdown");
         if (this.ws) this.ws.disconnect();
+        this.btcPrice?.stop();
         logger.info("BTC 5m market maker stopped");
     }
 
@@ -255,6 +303,8 @@ class BtcFiveMinuteMarketMakerBot {
         this.buyCostUp = 0;
         this.buyCostDown = 0;
         this.realizedCost = 0;
+        this.btcHistory = [];
+        this.lastBtcSnapshotAt = 0;
     }
 
     private async initializeCurrentCycle(): Promise<void> {
@@ -287,7 +337,8 @@ class BtcFiveMinuteMarketMakerBot {
         if (!upPrice || !downPrice) return [];
 
         const secondsLeft = (this.tokens.endMs - Date.now()) / 1000;
-        const decision = buildBtc5mMarketMakerQuotes({
+        if (secondsLeft <= this.cfg.cancelSecondsBeforeEnd || secondsLeft < this.cfg.minSecondsLeftToQuote) return [];
+        const commonInput = {
             up: upPrice,
             down: downPrice,
             upTokenId: this.tokens.upTokenId,
@@ -312,10 +363,26 @@ class BtcFiveMinuteMarketMakerBot {
                 pendingBuyNotionalUp: this.pendingBuyNotional("UP", "UP:BUY"),
                 pendingBuyNotionalDown: this.pendingBuyNotional("DOWN", "DOWN:BUY"),
             },
-        });
+        };
+        const btcSnapshot = this.btcPrice?.getSnapshot();
+        if (btcSnapshot && btcSnapshot.updatedAt > this.lastBtcSnapshotAt) {
+            this.btcHistory.push({ timestampMs: btcSnapshot.updatedAt, btcPrice: btcSnapshot.price });
+            this.lastBtcSnapshotAt = btcSnapshot.updatedAt;
+            const cutoff = btcSnapshot.updatedAt - Math.max(this.cfg.conditional.lookbackSeconds, this.cfg.conditional.accelerationLookbackSeconds) * 1000 - 2000;
+            while (this.btcHistory.length && this.btcHistory[0].timestampMs < cutoff) this.btcHistory.shift();
+        }
+        const decision = this.cfg.mode === "conditional"
+            ? buildBtc5mConditionalMarketMakerQuotes({
+                ...commonInput,
+                timestampMs: Date.now(),
+                btcPrice: this.btcPrice?.getPrice() ?? undefined,
+                history: this.btcHistory,
+                conditionalParams: this.cfg.conditional,
+            })
+            : buildBtc5mMarketMakerQuotes(commonInput);
 
         logger.info(
-            `MM fair: UP=${decision.fairUp?.toFixed(4) ?? "--"} DOWN=${decision.fairDown?.toFixed(4) ?? "--"} | bidCost=${decision.bidCost?.toFixed(4) ?? "--"} | inv UP=${this.qUp.toFixed(4)} DOWN=${this.qDown.toFixed(4)} net=${(this.qUp - this.qDown).toFixed(4)} | buyCost UP=${this.buyCostUp.toFixed(4)} DOWN=${this.buyCostDown.toFixed(4)}`
+            `MM fair: UP=${decision.fairUp?.toFixed(4) ?? "--"} DOWN=${decision.fairDown?.toFixed(4) ?? "--"} | bidCost=${decision.bidCost?.toFixed(4) ?? "--"} | inv UP=${this.qUp.toFixed(4)} DOWN=${this.qDown.toFixed(4)} net=${(this.qUp - this.qDown).toFixed(4)} | buyCost UP=${this.buyCostUp.toFixed(4)} DOWN=${this.buyCostDown.toFixed(4)} | decision=${decision.reason ?? "quote"}`
         );
         return decision.quotes as Quote[];
     }

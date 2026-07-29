@@ -74,7 +74,7 @@ function buyBudgetSize(params: Btc5mMarketMakerParams, spent: number, reserved: 
 }
 
 function roundToTick(price: number, tick: number, mode: "floor" | "ceil"): number {
-    const rounded = mode === "floor" ? Math.floor(price / tick) * tick : Math.ceil(price / tick) * tick;
+    const rounded = mode === "floor" ? Math.floor((price + 1e-9) / tick) * tick : Math.ceil((price - 1e-9) / tick) * tick;
     return Number(clamp(rounded, tick, 1 - tick).toFixed(tickDecimals(tick)));
 }
 
