@@ -17,6 +17,7 @@ const conditionalParams: Btc5mConditionalMarketMakerParams = {
     unfavoredSizeMultiplier: 0.5,
     maxNetInventoryShares: 10,
     minOrderUsdc: 1,
+    minOrderShares: 5,
     minSellProfit: 0.01,
 };
 
@@ -26,7 +27,7 @@ function input(prices: number[]) {
         timestampMs,
         btcPrice: prices.at(-1),
         history: prices.map((btcPrice, index) => ({ timestampMs: index * 1000, btcPrice })),
-        conditionalParams,
+        conditionalParams: { ...conditionalParams },
         up: { bestBid: 0.49, bestAsk: 0.51, mid: 0.50 },
         down: { bestBid: 0.49, bestAsk: 0.51, mid: 0.50 },
         secondsLeft: 120,
@@ -42,7 +43,9 @@ test("stops quoting when BTC accelerates", () => {
 });
 
 test("skews price and size toward mild momentum", () => {
-    const decision = buildBtc5mConditionalMarketMakerQuotes(input([100, 100.02, 100.01, 100.03, 100.02, 100.04, 100.03, 100.05, 100.04, 100.05, 100.06]));
+    const value = input([100, 100.02, 100.01, 100.03, 100.02, 100.04, 100.03, 100.05, 100.04, 100.05, 100.06]);
+    value.conditionalParams.minOrderShares = 2.5;
+    const decision = buildBtc5mConditionalMarketMakerQuotes(value);
     const up = decision.quotes.find((quote) => quote.leg === "UP" && quote.side === "BUY");
     const down = decision.quotes.find((quote) => quote.leg === "DOWN" && quote.side === "BUY");
     assert.equal(up?.price, 0.48);
@@ -63,6 +66,15 @@ test("skips buy quotes below the minimum order notional", () => {
     value.params.quoteShares = 1;
     const decision = buildBtc5mConditionalMarketMakerQuotes(value);
     assert.equal(decision.quotes.filter((quote) => quote.side === "BUY").length, 0);
+});
+
+test("does not leave an orphan buy when the other leg is below minimum shares", () => {
+    const value = input([100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100]);
+    value.params.maxUsdcPerLeg = 2;
+    value.up = { bestBid: 0.24, bestAsk: 0.26, mid: 0.25 };
+    value.down = { bestBid: 0.73, bestAsk: 0.75, mid: 0.74 };
+    const decision = buildBtc5mConditionalMarketMakerQuotes(value);
+    assert.equal(decision.quotes.some((quote) => quote.side === "BUY"), false);
 });
 
 test("does not quote a sell below remaining average cost plus profit", () => {

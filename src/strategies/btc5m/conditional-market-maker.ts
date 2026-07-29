@@ -21,6 +21,7 @@ export type Btc5mConditionalMarketMakerParams = {
     unfavoredSizeMultiplier: number;
     maxNetInventoryShares: number;
     minOrderUsdc: number;
+    minOrderShares: number;
     minSellProfit: number;
 };
 
@@ -57,12 +58,15 @@ export function buildBtc5mConditionalMarketMakerQuotes(input: Btc5mConditionalMa
     }
 
     const netInventory = input.state.qUp - input.state.qDown;
-    const quotes = base.quotes
+    let quotes = base.quotes
         .flatMap((quote) => skewQuote(quote, metrics.favoredLeg, netInventory, input))
         .flatMap((quote) => {
             const protectedQuote = protectSellPrice(quote, input);
             return protectedQuote ? [protectedQuote] : [];
         });
+    const desiredBuyCount = base.quotes.filter((quote) => quote.side === "BUY").length;
+    const validBuyCount = quotes.filter((quote) => quote.side === "BUY").length;
+    if (desiredBuyCount === 2 && validBuyCount < 2) quotes = quotes.filter((quote) => quote.side !== "BUY");
     const buyUp = quotes.find((quote) => quote.side === "BUY" && quote.leg === "UP")?.price;
     const buyDown = quotes.find((quote) => quote.side === "BUY" && quote.leg === "DOWN")?.price;
     return {
@@ -131,7 +135,7 @@ function skewQuote(
     const sizeMultiplier = directional ? (favored ? conditionalParams.favoredSizeMultiplier : conditionalParams.unfavoredSizeMultiplier) : 1;
     const inventoryCapacity = Math.max(0, conditionalParams.maxNetInventoryShares - sameDirectionInventory);
     const size = Math.min(quote.size * sizeMultiplier, inventoryCapacity);
-    if (size <= 0 || price * size + 1e-9 < conditionalParams.minOrderUsdc) return [];
+    if (size + 1e-9 < conditionalParams.minOrderShares || price * size + 1e-9 < conditionalParams.minOrderUsdc) return [];
     return [{ ...quote, price, size, edge: quote.fair === undefined ? quote.edge : quote.fair - price, note: directional ? `${favored ? "favored" : "unfavored"} conditional quote` : "symmetric conditional quote" }];
 }
 

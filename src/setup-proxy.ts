@@ -3,6 +3,10 @@
  * Must be imported BEFORE any fetch calls.
  */
 import { ProxyAgent, setGlobalDispatcher } from "undici";
+import { config as dotenvConfig } from "dotenv";
+import { resolve } from "path";
+
+dotenvConfig({ path: resolve(process.cwd(), ".env") });
 
 const proxyUrl =
     process.env.HTTPS_PROXY ||

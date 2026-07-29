@@ -113,7 +113,7 @@ function loadMarketMakerConfig(): MarketMakerConfig {
         market: envString("MM_MARKET", envString("BTC5M_MARKET", "btc")).toLowerCase(),
         intervalMinutes: envNumber("MM_INTERVAL_MINUTES", envNumber("BTC5M_INTERVAL_MINUTES", 5)),
         quoteShares: envNumber("MM_QUOTE_SHARES", 5),
-        maxUsdcPerLeg: mode === "conditional" ? envNumber("CONDITIONAL_MM_MAX_USDC_PER_LEG", 2) : envNumber("MM_MAX_USDC_PER_LEG", 0),
+        maxUsdcPerLeg: mode === "conditional" ? envNumber("CONDITIONAL_MM_MAX_USDC_PER_LEG", 5) : envNumber("MM_MAX_USDC_PER_LEG", 0),
         maxInventoryShares: mode === "conditional" ? envNumber("CONDITIONAL_MM_MAX_INVENTORY_SHARES", 10) : envNumber("MM_MAX_INVENTORY_SHARES", 30),
         quoteSpread: envNumber("MM_QUOTE_SPREAD", 0.06),
         minLockedEdge: envNumber("MM_MIN_LOCKED_EDGE", 0.02),
@@ -144,6 +144,7 @@ function loadMarketMakerConfig(): MarketMakerConfig {
             unfavoredSizeMultiplier: envNumber("CONDITIONAL_MM_UNFAVORED_SIZE_MULTIPLIER", 1),
             maxNetInventoryShares: envNumber("CONDITIONAL_MM_MAX_NET_INVENTORY_SHARES", 5),
             minOrderUsdc: envNumber("CONDITIONAL_MM_MIN_ORDER_USDC", 1),
+            minOrderShares: envNumber("CONDITIONAL_MM_MIN_ORDER_SHARES", 5),
             minSellProfit: envNumber("CONDITIONAL_MM_MIN_SELL_PROFIT", 0.01),
         },
         orderRetryCooldownMs: envNumber("MM_ORDER_RETRY_COOLDOWN_MS", 5000),
@@ -168,7 +169,7 @@ function loadMarketMakerConfig(): MarketMakerConfig {
         if (cfg.conditional.lookbackSeconds <= 0 || cfg.conditional.accelerationLookbackSeconds <= 0 || cfg.conditional.accelerationLookbackSeconds > cfg.conditional.lookbackSeconds) throw new Error("Invalid conditional market-maker lookback");
         if (cfg.conditional.maxRangeBps <= 0 || cfg.conditional.maxTrendBps <= 0 || cfg.conditional.maxAccelerationBps <= 0 || cfg.conditional.trendEfficiencyMinMomentumBps < 0 || cfg.conditional.directionMinMomentumBps < 0) throw new Error("Invalid conditional market-maker BTC thresholds");
         if (!(cfg.conditional.maxTrendEfficiency > 0 && cfg.conditional.maxTrendEfficiency <= 1)) throw new Error("CONDITIONAL_MM_MAX_TREND_EFFICIENCY must be between 0 and 1");
-        if (cfg.conditional.favoredPriceImprove < 0 || cfg.conditional.unfavoredPriceOffset < 0 || cfg.conditional.favoredSizeMultiplier <= 0 || cfg.conditional.unfavoredSizeMultiplier <= 0 || cfg.conditional.maxNetInventoryShares <= 0 || cfg.conditional.minOrderUsdc <= 0 || cfg.conditional.minOrderUsdc > cfg.maxUsdcPerLeg || cfg.conditional.minSellProfit < 0) throw new Error("Invalid conditional market-maker skew or order-size parameters");
+        if (cfg.conditional.favoredPriceImprove < 0 || cfg.conditional.unfavoredPriceOffset < 0 || cfg.conditional.favoredSizeMultiplier <= 0 || cfg.conditional.unfavoredSizeMultiplier <= 0 || cfg.conditional.maxNetInventoryShares <= 0 || cfg.conditional.minOrderUsdc <= 0 || cfg.conditional.minOrderUsdc > cfg.maxUsdcPerLeg || cfg.conditional.minOrderShares <= 0 || cfg.conditional.minSellProfit < 0) throw new Error("Invalid conditional market-maker skew or order-size parameters");
     }
     return cfg;
 }

@@ -60,6 +60,7 @@ type BacktestConfig = {
     conditionalMmUnfavoredSizeMultiplier: number;
     conditionalMmMaxNetInventoryShares: number;
     conditionalMmMinOrderUsdc: number;
+    conditionalMmMinOrderShares: number;
     conditionalMmMinSellProfit: number;
     // Hybrid params
     hybridLookbackSeconds: number;
@@ -372,7 +373,7 @@ function loadConfig(): BacktestConfig {
         marketMakerQuoteSpread: Number(getArgValue("--mm-quote-spread") ?? envNumber("MM_QUOTE_SPREAD", 0.06)),
         marketMakerMinLockedEdge: Number(getArgValue("--mm-min-locked-edge") ?? envNumber("MM_MIN_LOCKED_EDGE", 0.02)),
         marketMakerInventorySkewPerShare: Number(getArgValue("--mm-inventory-skew-per-share") ?? envNumber("MM_INVENTORY_SKEW_PER_SHARE", 0.002)),
-        marketMakerMaxUsdcPerLeg: Number(getArgValue("--mm-max-usdc-per-leg") ?? (strategy === "conditional-market-maker" ? envNumber("CONDITIONAL_MM_MAX_USDC_PER_LEG", 2) : envNumber("MM_MAX_USDC_PER_LEG", 0))),
+        marketMakerMaxUsdcPerLeg: Number(getArgValue("--mm-max-usdc-per-leg") ?? (strategy === "conditional-market-maker" ? envNumber("CONDITIONAL_MM_MAX_USDC_PER_LEG", 5) : envNumber("MM_MAX_USDC_PER_LEG", 0))),
         marketMakerMaxInventoryShares: Number(getArgValue("--mm-max-inventory-shares") ?? (strategy === "conditional-market-maker" ? envNumber("CONDITIONAL_MM_MAX_INVENTORY_SHARES", 10) : envNumber("MM_MAX_INVENTORY_SHARES", 30))),
         conditionalMmLookbackSeconds: Number(getArgValue("--cmm-lookback") ?? envNumber("CONDITIONAL_MM_LOOKBACK_SECONDS", 15)),
         conditionalMmAccelerationLookbackSeconds: Number(getArgValue("--cmm-acceleration-lookback") ?? envNumber("CONDITIONAL_MM_ACCELERATION_LOOKBACK_SECONDS", 2)),
@@ -388,6 +389,7 @@ function loadConfig(): BacktestConfig {
         conditionalMmUnfavoredSizeMultiplier: Number(getArgValue("--cmm-unfavored-size-multiplier") ?? envNumber("CONDITIONAL_MM_UNFAVORED_SIZE_MULTIPLIER", 1)),
         conditionalMmMaxNetInventoryShares: Number(getArgValue("--cmm-max-net-inventory-shares") ?? envNumber("CONDITIONAL_MM_MAX_NET_INVENTORY_SHARES", 5)),
         conditionalMmMinOrderUsdc: Number(getArgValue("--cmm-min-order-usdc") ?? envNumber("CONDITIONAL_MM_MIN_ORDER_USDC", 1)),
+        conditionalMmMinOrderShares: Number(getArgValue("--cmm-min-order-shares") ?? envNumber("CONDITIONAL_MM_MIN_ORDER_SHARES", 5)),
         conditionalMmMinSellProfit: Number(getArgValue("--cmm-min-sell-profit") ?? envNumber("CONDITIONAL_MM_MIN_SELL_PROFIT", 0.01)),
         // Hybrid params
         hybridLookbackSeconds: Number(getArgValue("--hybrid-lookback") ?? envNumber("HYBRID_LOOKBACK_SECONDS", 60)),
@@ -564,7 +566,7 @@ function loadConfig(): BacktestConfig {
     if (cfg.conditionalMmLookbackSeconds <= 0 || cfg.conditionalMmAccelerationLookbackSeconds <= 0 || cfg.conditionalMmAccelerationLookbackSeconds > cfg.conditionalMmLookbackSeconds) throw new Error("Invalid conditional market-maker lookback");
     if (cfg.conditionalMmMaxRangeBps <= 0 || cfg.conditionalMmMaxTrendBps <= 0 || cfg.conditionalMmMaxAccelerationBps <= 0 || cfg.conditionalMmTrendEfficiencyMinMomentumBps < 0 || cfg.conditionalMmDirectionMinMomentumBps < 0) throw new Error("Invalid conditional market-maker BTC thresholds");
     if (!(cfg.conditionalMmMaxTrendEfficiency > 0 && cfg.conditionalMmMaxTrendEfficiency <= 1)) throw new Error("CONDITIONAL_MM_MAX_TREND_EFFICIENCY must be between 0 and 1");
-    if (cfg.conditionalMmFavoredPriceImprove < 0 || cfg.conditionalMmUnfavoredPriceOffset < 0 || cfg.conditionalMmFavoredSizeMultiplier <= 0 || cfg.conditionalMmUnfavoredSizeMultiplier <= 0 || cfg.conditionalMmMaxNetInventoryShares <= 0 || cfg.conditionalMmMinOrderUsdc <= 0 || cfg.conditionalMmMinOrderUsdc > cfg.marketMakerMaxUsdcPerLeg || cfg.conditionalMmMinSellProfit < 0) throw new Error("Invalid conditional market-maker skew, inventory, or order-size parameters");
+    if (cfg.conditionalMmFavoredPriceImprove < 0 || cfg.conditionalMmUnfavoredPriceOffset < 0 || cfg.conditionalMmFavoredSizeMultiplier <= 0 || cfg.conditionalMmUnfavoredSizeMultiplier <= 0 || cfg.conditionalMmMaxNetInventoryShares <= 0 || cfg.conditionalMmMinOrderUsdc <= 0 || cfg.conditionalMmMinOrderUsdc > cfg.marketMakerMaxUsdcPerLeg || cfg.conditionalMmMinOrderShares <= 0 || cfg.conditionalMmMinSellProfit < 0) throw new Error("Invalid conditional market-maker skew, inventory, or order-size parameters");
     if (cfg.managedMinSecondsLeftToOpen < 0) throw new Error("MANAGED_EDGE_MIN_SECONDS_LEFT_TO_OPEN must be >= 0");
     if (cfg.managedMaxSecondsLeftToOpen < cfg.managedMinSecondsLeftToOpen) throw new Error("MANAGED_EDGE_MAX_SECONDS_LEFT_TO_OPEN must be >= MANAGED_EDGE_MIN_SECONDS_LEFT_TO_OPEN");
     if (cfg.managedNoCheapBuySecondsLeft < 0) throw new Error("MANAGED_EDGE_NO_CHEAP_BUY_SECONDS_LEFT must be >= 0");
@@ -1647,6 +1649,7 @@ function runConditionalMarketMakerBacktest(rows: MarketRow[], cfg: BacktestConfi
                 unfavoredSizeMultiplier: cfg.conditionalMmUnfavoredSizeMultiplier,
                 maxNetInventoryShares: cfg.conditionalMmMaxNetInventoryShares,
                 minOrderUsdc: cfg.conditionalMmMinOrderUsdc,
+                minOrderShares: cfg.conditionalMmMinOrderShares,
                 minSellProfit: cfg.conditionalMmMinSellProfit,
             },
             state: {
