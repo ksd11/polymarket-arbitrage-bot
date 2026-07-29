@@ -17,6 +17,7 @@ const conditionalParams: Btc5mConditionalMarketMakerParams = {
     unfavoredSizeMultiplier: 0.5,
     maxNetInventoryShares: 10,
     minOrderUsdc: 1,
+    minSellProfit: 0.01,
 };
 
 function input(prices: number[]) {
@@ -30,7 +31,7 @@ function input(prices: number[]) {
         down: { bestBid: 0.49, bestAsk: 0.51, mid: 0.50 },
         secondsLeft: 120,
         params: { quoteShares: 5, maxUsdcPerLeg: 20, maxInventoryShares: 20, quoteSpread: 0.06, minLockedEdge: 0.02, inventorySkewPerShare: 0.002, enableSellExcess: false, minSecondsLeftToQuote: 30, tick: 0.01 },
-        state: { qUp: 0, qDown: 0, buyCostUp: 0, buyCostDown: 0 },
+        state: { qUp: 0, qDown: 0, buyCostUp: 0, buyCostDown: 0, positionCostUp: 0, positionCostDown: 0 },
     };
 }
 
@@ -62,4 +63,25 @@ test("skips buy quotes below the minimum order notional", () => {
     value.params.quoteShares = 1;
     const decision = buildBtc5mConditionalMarketMakerQuotes(value);
     assert.equal(decision.quotes.filter((quote) => quote.side === "BUY").length, 0);
+});
+
+test("does not quote a sell below remaining average cost plus profit", () => {
+    const value = input([100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100]);
+    value.params.enableSellExcess = true;
+    value.state.qDown = 5;
+    value.state.positionCostDown = 3;
+    const decision = buildBtc5mConditionalMarketMakerQuotes(value);
+    const sell = decision.quotes.find((quote) => quote.leg === "DOWN" && quote.side === "SELL");
+    assert.equal(sell?.price, 0.61);
+    assert.match(sell?.note ?? "", /cost-protected sell/);
+});
+
+test("keeps a protected sell while rapid movement blocks new buys", () => {
+    const value = input([100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100.02, 100.08, 100.12]);
+    value.params.enableSellExcess = true;
+    value.state.qDown = 5;
+    value.state.positionCostDown = 3;
+    const decision = buildBtc5mConditionalMarketMakerQuotes(value);
+    assert.equal(decision.quotes.some((quote) => quote.side === "BUY"), false);
+    assert.equal(decision.quotes.find((quote) => quote.side === "SELL")?.price, 0.61);
 });

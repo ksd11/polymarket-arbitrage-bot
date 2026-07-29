@@ -17,6 +17,8 @@ export type Btc5mMarketMakerState = {
     qDown: number;
     buyCostUp: number;
     buyCostDown: number;
+    positionCostUp?: number;
+    positionCostDown?: number;
     pendingBuyNotionalUp?: number;
     pendingBuyNotionalDown?: number;
 };

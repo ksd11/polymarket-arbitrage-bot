@@ -60,6 +60,7 @@ type BacktestConfig = {
     conditionalMmUnfavoredSizeMultiplier: number;
     conditionalMmMaxNetInventoryShares: number;
     conditionalMmMinOrderUsdc: number;
+    conditionalMmMinSellProfit: number;
     // Hybrid params
     hybridLookbackSeconds: number;
     hybridOscillationThreshold: number;
@@ -387,6 +388,7 @@ function loadConfig(): BacktestConfig {
         conditionalMmUnfavoredSizeMultiplier: Number(getArgValue("--cmm-unfavored-size-multiplier") ?? envNumber("CONDITIONAL_MM_UNFAVORED_SIZE_MULTIPLIER", 1)),
         conditionalMmMaxNetInventoryShares: Number(getArgValue("--cmm-max-net-inventory-shares") ?? envNumber("CONDITIONAL_MM_MAX_NET_INVENTORY_SHARES", 5)),
         conditionalMmMinOrderUsdc: Number(getArgValue("--cmm-min-order-usdc") ?? envNumber("CONDITIONAL_MM_MIN_ORDER_USDC", 1)),
+        conditionalMmMinSellProfit: Number(getArgValue("--cmm-min-sell-profit") ?? envNumber("CONDITIONAL_MM_MIN_SELL_PROFIT", 0.01)),
         // Hybrid params
         hybridLookbackSeconds: Number(getArgValue("--hybrid-lookback") ?? envNumber("HYBRID_LOOKBACK_SECONDS", 60)),
         hybridOscillationThreshold: Number(getArgValue("--hybrid-osc-threshold") ?? envNumber("HYBRID_OSC_THRESHOLD", 2)),
@@ -562,7 +564,7 @@ function loadConfig(): BacktestConfig {
     if (cfg.conditionalMmLookbackSeconds <= 0 || cfg.conditionalMmAccelerationLookbackSeconds <= 0 || cfg.conditionalMmAccelerationLookbackSeconds > cfg.conditionalMmLookbackSeconds) throw new Error("Invalid conditional market-maker lookback");
     if (cfg.conditionalMmMaxRangeBps <= 0 || cfg.conditionalMmMaxTrendBps <= 0 || cfg.conditionalMmMaxAccelerationBps <= 0 || cfg.conditionalMmTrendEfficiencyMinMomentumBps < 0 || cfg.conditionalMmDirectionMinMomentumBps < 0) throw new Error("Invalid conditional market-maker BTC thresholds");
     if (!(cfg.conditionalMmMaxTrendEfficiency > 0 && cfg.conditionalMmMaxTrendEfficiency <= 1)) throw new Error("CONDITIONAL_MM_MAX_TREND_EFFICIENCY must be between 0 and 1");
-    if (cfg.conditionalMmFavoredPriceImprove < 0 || cfg.conditionalMmUnfavoredPriceOffset < 0 || cfg.conditionalMmFavoredSizeMultiplier <= 0 || cfg.conditionalMmUnfavoredSizeMultiplier <= 0 || cfg.conditionalMmMaxNetInventoryShares <= 0 || cfg.conditionalMmMinOrderUsdc <= 0 || cfg.conditionalMmMinOrderUsdc > cfg.marketMakerMaxUsdcPerLeg) throw new Error("Invalid conditional market-maker skew, inventory, or order-size parameters");
+    if (cfg.conditionalMmFavoredPriceImprove < 0 || cfg.conditionalMmUnfavoredPriceOffset < 0 || cfg.conditionalMmFavoredSizeMultiplier <= 0 || cfg.conditionalMmUnfavoredSizeMultiplier <= 0 || cfg.conditionalMmMaxNetInventoryShares <= 0 || cfg.conditionalMmMinOrderUsdc <= 0 || cfg.conditionalMmMinOrderUsdc > cfg.marketMakerMaxUsdcPerLeg || cfg.conditionalMmMinSellProfit < 0) throw new Error("Invalid conditional market-maker skew, inventory, or order-size parameters");
     if (cfg.managedMinSecondsLeftToOpen < 0) throw new Error("MANAGED_EDGE_MIN_SECONDS_LEFT_TO_OPEN must be >= 0");
     if (cfg.managedMaxSecondsLeftToOpen < cfg.managedMinSecondsLeftToOpen) throw new Error("MANAGED_EDGE_MAX_SECONDS_LEFT_TO_OPEN must be >= MANAGED_EDGE_MIN_SECONDS_LEFT_TO_OPEN");
     if (cfg.managedNoCheapBuySecondsLeft < 0) throw new Error("MANAGED_EDGE_NO_CHEAP_BUY_SECONDS_LEFT must be >= 0");
@@ -1645,12 +1647,15 @@ function runConditionalMarketMakerBacktest(rows: MarketRow[], cfg: BacktestConfi
                 unfavoredSizeMultiplier: cfg.conditionalMmUnfavoredSizeMultiplier,
                 maxNetInventoryShares: cfg.conditionalMmMaxNetInventoryShares,
                 minOrderUsdc: cfg.conditionalMmMinOrderUsdc,
+                minSellProfit: cfg.conditionalMmMinSellProfit,
             },
             state: {
                 qUp: cycle.inventoryUp,
                 qDown: cycle.inventoryDown,
                 buyCostUp: cycle.spentUp,
                 buyCostDown: cycle.spentDown,
+                positionCostUp: cycle.costUp,
+                positionCostDown: cycle.costDown,
             },
         });
         quotes.clear();

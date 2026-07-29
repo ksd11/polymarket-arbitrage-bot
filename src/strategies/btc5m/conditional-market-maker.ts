@@ -21,6 +21,7 @@ export type Btc5mConditionalMarketMakerParams = {
     unfavoredSizeMultiplier: number;
     maxNetInventoryShares: number;
     minOrderUsdc: number;
+    minSellProfit: number;
 };
 
 export type Btc5mConditionalMarketMakerInput = Btc5mMarketMakerInput & {
@@ -40,23 +41,28 @@ export type Btc5mConditionalMarketMetrics = {
 
 export function buildBtc5mConditionalMarketMakerQuotes(input: Btc5mConditionalMarketMakerInput): Btc5mStrategyDecision & { metrics?: Btc5mConditionalMarketMetrics } {
     const metrics = calculateConditionalMarketMetrics(input.timestampMs, input.btcPrice, input.history, input.conditionalParams);
-    if (!metrics) return { quotes: [], reason: "insufficient BTC history" };
+    const base = buildBtc5mMarketMakerQuotes(input);
+    if (!metrics) return retainProtectedSells(base, input, "insufficient BTC history");
     if (Math.abs(metrics.accelerationBps) >= input.conditionalParams.maxAccelerationBps) {
-        return { quotes: [], reason: `rapid BTC move ${metrics.accelerationBps.toFixed(2)}bps`, metrics };
+        return retainProtectedSells(base, input, `rapid BTC move ${metrics.accelerationBps.toFixed(2)}bps`, metrics);
     }
     if (metrics.rangeBps > input.conditionalParams.maxRangeBps) {
-        return { quotes: [], reason: `BTC range too wide ${metrics.rangeBps.toFixed(2)}bps`, metrics };
+        return retainProtectedSells(base, input, `BTC range too wide ${metrics.rangeBps.toFixed(2)}bps`, metrics);
     }
     if (Math.abs(metrics.momentumBps) > input.conditionalParams.maxTrendBps) {
-        return { quotes: [], reason: `BTC trend too strong ${metrics.momentumBps.toFixed(2)}bps`, metrics };
+        return retainProtectedSells(base, input, `BTC trend too strong ${metrics.momentumBps.toFixed(2)}bps`, metrics);
     }
     if (metrics.trendEfficiency > input.conditionalParams.maxTrendEfficiency && Math.abs(metrics.momentumBps) >= input.conditionalParams.trendEfficiencyMinMomentumBps) {
-        return { quotes: [], reason: `BTC trend efficiency too high ${metrics.trendEfficiency.toFixed(2)}`, metrics };
+        return retainProtectedSells(base, input, `BTC trend efficiency too high ${metrics.trendEfficiency.toFixed(2)}`, metrics);
     }
 
-    const base = buildBtc5mMarketMakerQuotes(input);
     const netInventory = input.state.qUp - input.state.qDown;
-    const quotes = base.quotes.flatMap((quote) => skewQuote(quote, metrics.favoredLeg, netInventory, input));
+    const quotes = base.quotes
+        .flatMap((quote) => skewQuote(quote, metrics.favoredLeg, netInventory, input))
+        .flatMap((quote) => {
+            const protectedQuote = protectSellPrice(quote, input);
+            return protectedQuote ? [protectedQuote] : [];
+        });
     const buyUp = quotes.find((quote) => quote.side === "BUY" && quote.leg === "UP")?.price;
     const buyDown = quotes.find((quote) => quote.side === "BUY" && quote.leg === "DOWN")?.price;
     return {
@@ -66,6 +72,20 @@ export function buildBtc5mConditionalMarketMakerQuotes(input: Btc5mConditionalMa
         reason: metrics.favoredLeg ? `conditional skew ${metrics.favoredLeg} momentum=${metrics.momentumBps.toFixed(2)}bps` : "conditional symmetric quote",
         metrics,
     };
+}
+
+function retainProtectedSells(
+    base: Btc5mStrategyDecision,
+    input: Btc5mConditionalMarketMakerInput,
+    reason: string,
+    metrics?: Btc5mConditionalMarketMetrics,
+): Btc5mStrategyDecision & { metrics?: Btc5mConditionalMarketMetrics } {
+    const quotes = base.quotes.flatMap((quote) => {
+        if (quote.side !== "SELL") return [];
+        const protectedQuote = protectSellPrice(quote, input);
+        return protectedQuote ? [protectedQuote] : [];
+    });
+    return { ...base, quotes, reason, metrics };
 }
 
 export function calculateConditionalMarketMetrics(
@@ -115,6 +135,24 @@ function skewQuote(
     return [{ ...quote, price, size, edge: quote.fair === undefined ? quote.edge : quote.fair - price, note: directional ? `${favored ? "favored" : "unfavored"} conditional quote` : "symmetric conditional quote" }];
 }
 
+function protectSellPrice(quote: Btc5mStrategyQuote, input: Btc5mConditionalMarketMakerInput): Btc5mStrategyQuote | undefined {
+    if (quote.side !== "SELL") return quote;
+    const shares = quote.leg === "UP" ? input.state.qUp : input.state.qDown;
+    const positionCost = quote.leg === "UP" ? input.state.positionCostUp : input.state.positionCostDown;
+    if (!positionCost || shares <= 0) return quote;
+    const averageCost = positionCost / shares;
+    const rawMinimumPrice = averageCost + input.conditionalParams.minSellProfit;
+    if (rawMinimumPrice > 1 - input.params.tick + 1e-9) return undefined;
+    const minimumPrice = roundToTick(rawMinimumPrice, input.params.tick, "ceil");
+    if (quote.price >= minimumPrice) return quote;
+    return {
+        ...quote,
+        price: minimumPrice,
+        edge: quote.fair === undefined ? quote.edge : quote.fair - minimumPrice,
+        note: `cost-protected sell avg=${averageCost.toFixed(4)}`,
+    };
+}
+
 function closestAtOrBefore(samples: Btc5mConditionalMarketMakerSample[], timestampMs: number): Btc5mConditionalMarketMakerSample | undefined {
     let match: Btc5mConditionalMarketMakerSample | undefined;
     for (const sample of samples) {
@@ -124,7 +162,8 @@ function closestAtOrBefore(samples: Btc5mConditionalMarketMakerSample[], timesta
     return match;
 }
 
-function roundToTick(value: number, tick: number): number {
+function roundToTick(value: number, tick: number, mode: "floor" | "ceil" = "floor"): number {
     const decimals = (tick.toString().split(".")[1] ?? "").length;
-    return Number((Math.floor((value + 1e-9) / tick) * tick).toFixed(decimals));
+    const rounded = mode === "floor" ? Math.floor((value + 1e-9) / tick) : Math.ceil((value - 1e-9) / tick);
+    return Number(clamp(rounded * tick, tick, 1 - tick).toFixed(decimals));
 }

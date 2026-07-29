@@ -39,6 +39,7 @@ type MarketMakerConfig = {
     minSecondsLeftToQuote: number;
     cancelSecondsBeforeEnd: number;
     quoteIntervalMs: number;
+    orderRetryCooldownMs: number;
     pollIntervalMs: number;
     enableSellExcess: boolean;
     btcPriceUrls: string[];
@@ -143,7 +144,9 @@ function loadMarketMakerConfig(): MarketMakerConfig {
             unfavoredSizeMultiplier: envNumber("CONDITIONAL_MM_UNFAVORED_SIZE_MULTIPLIER", 1),
             maxNetInventoryShares: envNumber("CONDITIONAL_MM_MAX_NET_INVENTORY_SHARES", 5),
             minOrderUsdc: envNumber("CONDITIONAL_MM_MIN_ORDER_USDC", 1),
+            minSellProfit: envNumber("CONDITIONAL_MM_MIN_SELL_PROFIT", 0.01),
         },
+        orderRetryCooldownMs: envNumber("MM_ORDER_RETRY_COOLDOWN_MS", 5000),
     };
 
     if (cfg.intervalMinutes <= 0) throw new Error("MM_INTERVAL_MINUTES must be > 0");
@@ -157,6 +160,7 @@ function loadMarketMakerConfig(): MarketMakerConfig {
     if (cfg.minSecondsLeftToQuote < 0) throw new Error("MM_MIN_SECONDS_LEFT_TO_QUOTE must be >= 0");
     if (cfg.cancelSecondsBeforeEnd < 0) throw new Error("MM_CANCEL_SECONDS_BEFORE_END must be >= 0");
     if (cfg.quoteIntervalMs <= 0) throw new Error("MM_QUOTE_INTERVAL_MS must be > 0");
+    if (cfg.orderRetryCooldownMs < 0) throw new Error("MM_ORDER_RETRY_COOLDOWN_MS must be >= 0");
     if (cfg.pollIntervalMs <= 0) throw new Error("MM_POLL_INTERVAL_MS must be > 0");
     if (cfg.mode === "conditional") {
         if (!cfg.btcPriceUrls.length) throw new Error("CONDITIONAL_MM_BTC_PRICE_URLS is required");
@@ -164,7 +168,7 @@ function loadMarketMakerConfig(): MarketMakerConfig {
         if (cfg.conditional.lookbackSeconds <= 0 || cfg.conditional.accelerationLookbackSeconds <= 0 || cfg.conditional.accelerationLookbackSeconds > cfg.conditional.lookbackSeconds) throw new Error("Invalid conditional market-maker lookback");
         if (cfg.conditional.maxRangeBps <= 0 || cfg.conditional.maxTrendBps <= 0 || cfg.conditional.maxAccelerationBps <= 0 || cfg.conditional.trendEfficiencyMinMomentumBps < 0 || cfg.conditional.directionMinMomentumBps < 0) throw new Error("Invalid conditional market-maker BTC thresholds");
         if (!(cfg.conditional.maxTrendEfficiency > 0 && cfg.conditional.maxTrendEfficiency <= 1)) throw new Error("CONDITIONAL_MM_MAX_TREND_EFFICIENCY must be between 0 and 1");
-        if (cfg.conditional.favoredPriceImprove < 0 || cfg.conditional.unfavoredPriceOffset < 0 || cfg.conditional.favoredSizeMultiplier <= 0 || cfg.conditional.unfavoredSizeMultiplier <= 0 || cfg.conditional.maxNetInventoryShares <= 0 || cfg.conditional.minOrderUsdc <= 0 || cfg.conditional.minOrderUsdc > cfg.maxUsdcPerLeg) throw new Error("Invalid conditional market-maker skew or order-size parameters");
+        if (cfg.conditional.favoredPriceImprove < 0 || cfg.conditional.unfavoredPriceOffset < 0 || cfg.conditional.favoredSizeMultiplier <= 0 || cfg.conditional.unfavoredSizeMultiplier <= 0 || cfg.conditional.maxNetInventoryShares <= 0 || cfg.conditional.minOrderUsdc <= 0 || cfg.conditional.minOrderUsdc > cfg.maxUsdcPerLeg || cfg.conditional.minSellProfit < 0) throw new Error("Invalid conditional market-maker skew or order-size parameters");
     }
     return cfg;
 }
@@ -241,10 +245,14 @@ class BtcFiveMinuteMarketMakerBot {
     private timers: NodeJS.Timeout[] = [];
     private stopped = false;
     private requoteInFlight = false;
+    private lastRequoteAt = 0;
+    private failedOrderAttempts = new Map<OrderKey, { timestampMs: number; price: number; size: number }>();
     private qUp = 0;
     private qDown = 0;
     private buyCostUp = 0;
     private buyCostDown = 0;
+    private positionCostUp = 0;
+    private positionCostDown = 0;
     private realizedCost = 0;
     private readonly tick: number;
     private readonly btcPrice: BtcPriceProvider | null;
@@ -261,7 +269,7 @@ class BtcFiveMinuteMarketMakerBot {
             `Starting BTC 5m market maker: mode=${this.cfg.mode}, market=${this.cfg.market}, spread=${this.cfg.quoteSpread}, minEdge=${this.cfg.minLockedEdge}, shares=${this.cfg.quoteShares}, maxUsdcPerLeg=${this.cfg.maxUsdcPerLeg || "unlimited"}, dryRun=${this.cfg.dryRun}`
         );
         if (this.btcPrice) await this.btcPrice.start();
-        this.ws = new WebSocketOrderBook("market", [], null);
+        this.ws = new WebSocketOrderBook("market", [], null, 1000);
         await this.ws.connect();
         await this.initializeCurrentCycle();
 
@@ -303,7 +311,11 @@ class BtcFiveMinuteMarketMakerBot {
         this.qDown = 0;
         this.buyCostUp = 0;
         this.buyCostDown = 0;
+        this.positionCostUp = 0;
+        this.positionCostDown = 0;
         this.realizedCost = 0;
+        this.lastRequoteAt = 0;
+        this.failedOrderAttempts.clear();
         this.btcHistory = [];
         this.lastBtcSnapshotAt = 0;
     }
@@ -361,6 +373,8 @@ class BtcFiveMinuteMarketMakerBot {
                 qDown: this.qDown,
                 buyCostUp: this.buyCostUp,
                 buyCostDown: this.buyCostDown,
+                positionCostUp: this.positionCostUp,
+                positionCostDown: this.positionCostDown,
                 pendingBuyNotionalUp: this.pendingBuyNotional("UP", "UP:BUY"),
                 pendingBuyNotionalDown: this.pendingBuyNotional("DOWN", "DOWN:BUY"),
             },
@@ -383,7 +397,7 @@ class BtcFiveMinuteMarketMakerBot {
             : buildBtc5mMarketMakerQuotes(commonInput);
 
         logger.info(
-            `MM fair: UP=${decision.fairUp?.toFixed(4) ?? "--"} DOWN=${decision.fairDown?.toFixed(4) ?? "--"} | bidCost=${decision.bidCost?.toFixed(4) ?? "--"} | inv UP=${this.qUp.toFixed(4)} DOWN=${this.qDown.toFixed(4)} net=${(this.qUp - this.qDown).toFixed(4)} | buyCost UP=${this.buyCostUp.toFixed(4)} DOWN=${this.buyCostDown.toFixed(4)} | decision=${decision.reason ?? "quote"}`
+            `MM fair: UP=${decision.fairUp?.toFixed(4) ?? "--"} DOWN=${decision.fairDown?.toFixed(4) ?? "--"} | bidCost=${decision.bidCost?.toFixed(4) ?? "--"} | inv UP=${this.qUp.toFixed(4)} DOWN=${this.qDown.toFixed(4)} net=${(this.qUp - this.qDown).toFixed(4)} | positionCost UP=${this.positionCostUp.toFixed(4)} DOWN=${this.positionCostDown.toFixed(4)} | spent UP=${this.buyCostUp.toFixed(4)} DOWN=${this.buyCostDown.toFixed(4)} | decision=${decision.reason ?? "quote"}`
         );
         return decision.quotes as Quote[];
     }
@@ -399,6 +413,9 @@ class BtcFiveMinuteMarketMakerBot {
 
     private async requote(): Promise<void> {
         if (this.stopped || this.requoteInFlight) return;
+        const now = Date.now();
+        if (now - this.lastRequoteAt < this.cfg.quoteIntervalMs) return;
+        this.lastRequoteAt = now;
         this.requoteInFlight = true;
         try {
             const desired = new Map<OrderKey, Quote>(this.buildQuotes().map((quote) => [quote.key, quote]));
@@ -414,6 +431,8 @@ class BtcFiveMinuteMarketMakerBot {
 
             for (const quote of desired.values()) {
                 if (!this.activeOrders.has(quote.key)) {
+                    const failed = this.failedOrderAttempts.get(quote.key);
+                    if (failed && failed.price === quote.price && Math.abs(failed.size - quote.size) < 1e-9 && Date.now() - failed.timestampMs < this.cfg.orderRetryCooldownMs) continue;
                     const placed = await this.placeOrder(quote);
                     if (placed) this.activeOrders.set(quote.key, placed);
                 }
@@ -456,9 +475,11 @@ class BtcFiveMinuteMarketMakerBot {
             );
             const orderId = response?.orderID;
             if (!orderId) {
-                logger.error(`${quote.side} ${quote.leg} returned no orderID`);
+                this.failedOrderAttempts.set(quote.key, { timestampMs: Date.now(), price: quote.price, size: quote.size });
+                logger.error(`${quote.side} ${quote.leg} returned no orderID: ${formatClobResponse(response)}`);
                 return null;
             }
+            this.failedOrderAttempts.delete(quote.key);
             logger.info(`Posted ${quote.side} ${quote.leg} ${orderId.slice(0, 12)}...: ${quote.size.toFixed(4)} @ ${quote.price.toFixed(4)}`);
             return {
                 key: quote.key,
@@ -472,6 +493,7 @@ class BtcFiveMinuteMarketMakerBot {
                 status: "NEW",
             };
         } catch (error) {
+            this.failedOrderAttempts.set(quote.key, { timestampMs: Date.now(), price: quote.price, size: quote.size });
             logger.error(`Failed to post ${quote.side} ${quote.leg}: ${error instanceof Error ? error.message : String(error)}`);
             return null;
         }
@@ -506,12 +528,26 @@ class BtcFiveMinuteMarketMakerBot {
     }
 
     private applyFill(order: ActiveOrder, fillDelta: number): void {
+        const currentShares = order.leg === "UP" ? this.qUp : this.qDown;
+        const currentPositionCost = order.leg === "UP" ? this.positionCostUp : this.positionCostDown;
+        const averageCost = currentShares > 0 ? currentPositionCost / currentShares : 0;
         const signedShares = order.side === "BUY" ? fillDelta : -fillDelta;
         const signedCost = order.side === "BUY" ? order.price * fillDelta : -order.price * fillDelta;
         if (order.leg === "UP") this.qUp += signedShares;
         else this.qDown += signedShares;
-        if (order.side === "BUY" && order.leg === "UP") this.buyCostUp += order.price * fillDelta;
-        if (order.side === "BUY" && order.leg === "DOWN") this.buyCostDown += order.price * fillDelta;
+        if (order.leg === "UP") {
+            if (order.side === "BUY") {
+                this.buyCostUp += order.price * fillDelta;
+                this.positionCostUp += order.price * fillDelta;
+            } else {
+                this.positionCostUp = Math.max(0, this.positionCostUp - averageCost * fillDelta);
+            }
+        } else if (order.side === "BUY") {
+            this.buyCostDown += order.price * fillDelta;
+            this.positionCostDown += order.price * fillDelta;
+        } else {
+            this.positionCostDown = Math.max(0, this.positionCostDown - averageCost * fillDelta);
+        }
         this.qUp = Math.max(0, this.qUp);
         this.qDown = Math.max(0, this.qDown);
         this.realizedCost += signedCost;
@@ -536,6 +572,14 @@ class BtcFiveMinuteMarketMakerBot {
             await this.cancelOrder(order, reason);
         }
         this.activeOrders.clear();
+    }
+}
+
+function formatClobResponse(response: unknown): string {
+    try {
+        return JSON.stringify(response);
+    } catch {
+        return String(response);
     }
 }
 
