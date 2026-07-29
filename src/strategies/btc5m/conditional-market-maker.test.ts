@@ -16,6 +16,7 @@ const conditionalParams: Btc5mConditionalMarketMakerParams = {
     favoredSizeMultiplier: 1.5,
     unfavoredSizeMultiplier: 0.5,
     maxNetInventoryShares: 10,
+    minOrderUsdc: 1,
 };
 
 function input(prices: number[]) {
@@ -54,4 +55,11 @@ test("stops adding inventory in the same direction at the net cap", () => {
     value.state.qUp = 10;
     const decision = buildBtc5mConditionalMarketMakerQuotes(value);
     assert.equal(decision.quotes.some((quote) => quote.leg === "UP" && quote.side === "BUY"), false);
+});
+
+test("skips buy quotes below the minimum order notional", () => {
+    const value = input([100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100]);
+    value.params.quoteShares = 1;
+    const decision = buildBtc5mConditionalMarketMakerQuotes(value);
+    assert.equal(decision.quotes.filter((quote) => quote.side === "BUY").length, 0);
 });

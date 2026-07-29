@@ -20,6 +20,7 @@ export type Btc5mConditionalMarketMakerParams = {
     favoredSizeMultiplier: number;
     unfavoredSizeMultiplier: number;
     maxNetInventoryShares: number;
+    minOrderUsdc: number;
 };
 
 export type Btc5mConditionalMarketMakerInput = Btc5mMarketMakerInput & {
@@ -54,17 +55,15 @@ export function buildBtc5mConditionalMarketMakerQuotes(input: Btc5mConditionalMa
     }
 
     const base = buildBtc5mMarketMakerQuotes(input);
-    if (!metrics.favoredLeg) return { ...base, reason: base.reason ?? "conditional symmetric quote", metrics };
-
     const netInventory = input.state.qUp - input.state.qDown;
-    const quotes = base.quotes.flatMap((quote) => skewQuote(quote, metrics.favoredLeg as Btc5mLeg, netInventory, input));
+    const quotes = base.quotes.flatMap((quote) => skewQuote(quote, metrics.favoredLeg, netInventory, input));
     const buyUp = quotes.find((quote) => quote.side === "BUY" && quote.leg === "UP")?.price;
     const buyDown = quotes.find((quote) => quote.side === "BUY" && quote.leg === "DOWN")?.price;
     return {
         ...base,
         quotes,
         bidCost: buyUp !== undefined && buyDown !== undefined ? buyUp + buyDown : undefined,
-        reason: `conditional skew ${metrics.favoredLeg} momentum=${metrics.momentumBps.toFixed(2)}bps`,
+        reason: metrics.favoredLeg ? `conditional skew ${metrics.favoredLeg} momentum=${metrics.momentumBps.toFixed(2)}bps` : "conditional symmetric quote",
         metrics,
     };
 }
@@ -97,7 +96,7 @@ export function calculateConditionalMarketMetrics(
 
 function skewQuote(
     quote: Btc5mStrategyQuote,
-    favoredLeg: Btc5mLeg,
+    favoredLeg: Btc5mLeg | undefined,
     netInventory: number,
     input: Btc5mConditionalMarketMakerInput,
 ): Btc5mStrategyQuote[] {
@@ -105,14 +104,15 @@ function skewQuote(
     const { conditionalParams, params } = input;
     const sameDirectionInventory = quote.leg === "UP" ? netInventory : -netInventory;
     if (sameDirectionInventory >= conditionalParams.maxNetInventoryShares) return [];
+    const directional = favoredLeg !== undefined;
     const favored = quote.leg === favoredLeg;
-    const rawPrice = quote.price + (favored ? conditionalParams.favoredPriceImprove : -conditionalParams.unfavoredPriceOffset);
+    const rawPrice = directional ? quote.price + (favored ? conditionalParams.favoredPriceImprove : -conditionalParams.unfavoredPriceOffset) : quote.price;
     const price = roundToTick(clamp(rawPrice, params.tick, 1 - params.tick), params.tick);
-    const sizeMultiplier = favored ? conditionalParams.favoredSizeMultiplier : conditionalParams.unfavoredSizeMultiplier;
+    const sizeMultiplier = directional ? (favored ? conditionalParams.favoredSizeMultiplier : conditionalParams.unfavoredSizeMultiplier) : 1;
     const inventoryCapacity = Math.max(0, conditionalParams.maxNetInventoryShares - sameDirectionInventory);
     const size = Math.min(quote.size * sizeMultiplier, inventoryCapacity);
-    if (size <= 0) return [];
-    return [{ ...quote, price, size, edge: quote.fair === undefined ? quote.edge : quote.fair - price, note: `${favored ? "favored" : "unfavored"} conditional quote` }];
+    if (size <= 0 || price * size + 1e-9 < conditionalParams.minOrderUsdc) return [];
+    return [{ ...quote, price, size, edge: quote.fair === undefined ? quote.edge : quote.fair - price, note: directional ? `${favored ? "favored" : "unfavored"} conditional quote` : "symmetric conditional quote" }];
 }
 
 function closestAtOrBefore(samples: Btc5mConditionalMarketMakerSample[], timestampMs: number): Btc5mConditionalMarketMakerSample | undefined {
