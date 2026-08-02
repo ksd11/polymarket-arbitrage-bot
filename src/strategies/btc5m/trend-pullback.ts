@@ -1,4 +1,6 @@
 import { Btc5mLeg, Btc5mStrategyDecision } from "./types";
+import { Btc5mRegimeSnapshot } from "./regime";
+import { calculateBtcActivity, calculateBtcTrendQuality } from "./trend-quality";
 
 export type Btc5mTrendPullbackParams = {
     triggerPrice: number;
@@ -6,10 +8,22 @@ export type Btc5mTrendPullbackParams = {
     orderUsdc: number;
     maxUsdcPerLeg: number;
     minSecondsLeftToTrigger: number;
+    maxSecondsLeftToTrigger: number;
     minSecondsLeftToFill: number;
     triggerConfirmSeconds: number;
     maxOrderAgeSeconds: number;
     maxBtcReversalBps: number;
+    btcDirectionRequired: boolean;
+    trendAtrLookbackSeconds: number;
+    trendAtrFloorUsd: number;
+    trendMinGapSafety: number;
+    trendMinPeakGapRatio: number;
+    trendMaxSpread: number;
+    minBtcRangeUsd: number;
+    minBtcUniquePrices: number;
+    maxBtcUnchangedSeconds: number;
+    waitForPullbackTouch: boolean;
+    maxTouchDrop: number;
     postFillStopLossPrice: number;
     postFillTakeProfitPrice: number;
     postFillMaxBtcReversalBps: number;
@@ -37,6 +51,8 @@ export type Btc5mTrendPullbackInput = {
     upBid?: number;
     downBid?: number;
     btcPrice?: number;
+    openPrice?: number;
+    history?: Btc5mRegimeSnapshot[];
     spentUp: number;
     spentDown: number;
     state: Btc5mTrendPullbackState;
@@ -61,6 +77,9 @@ export function buildBtc5mTrendPullbackOrders(input: Btc5mTrendPullbackInput): B
         if (secondsLeft < input.params.minSecondsLeftToTrigger) {
             return { quotes: [], state, reason: "trend-pullback skip: too late to trigger" };
         }
+        if (secondsLeft > input.params.maxSecondsLeftToTrigger) {
+            return { quotes: [], state, reason: "trend-pullback waiting for entry window" };
+        }
 
         const candidateLeg = selectTriggeredLeg(input.upAsk, input.downAsk, input.params.triggerPrice);
         if (!candidateLeg) {
@@ -69,6 +88,29 @@ export function buildBtc5mTrendPullbackOrders(input: Btc5mTrendPullbackInput): B
                 state: { ...state, candidateLeg: undefined, candidateSinceMs: undefined },
                 reason: "trend-pullback waiting for trigger",
             };
+        }
+        const quality = calculateBtcTrendQuality({ timestampMs: input.timestampMs, leg: candidateLeg, openPrice: input.openPrice, btcPrice: input.btcPrice, history: input.history, atrLookbackSeconds: input.params.trendAtrLookbackSeconds, atrFloorUsd: input.params.trendAtrFloorUsd });
+        const activity = calculateBtcActivity(input.history, input.timestampMs, input.params.trendAtrLookbackSeconds);
+        const bid = candidateLeg === "UP" ? input.upBid : input.downBid;
+        const ask = candidateLeg === "UP" ? input.upAsk : input.downAsk;
+        const spread = bid === undefined || ask === undefined ? Number.POSITIVE_INFINITY : ask - bid;
+        const rejectedReason = input.params.minBtcRangeUsd > 0 && activity.rangeUsd < input.params.minBtcRangeUsd
+            ? `BTC range ${activity.rangeUsd.toFixed(2)} below ${input.params.minBtcRangeUsd.toFixed(2)}`
+            : input.params.minBtcUniquePrices > 0 && activity.uniquePrices < input.params.minBtcUniquePrices
+                ? `BTC unique prices ${activity.uniquePrices} below ${input.params.minBtcUniquePrices}`
+                : input.params.maxBtcUnchangedSeconds > 0 && activity.unchangedSeconds > input.params.maxBtcUnchangedSeconds
+                    ? `BTC unchanged ${activity.unchangedSeconds.toFixed(1)}s`
+                    : input.params.btcDirectionRequired && quality.directionalGap <= 0
+            ? "BTC direction disagrees"
+            : input.params.trendMinGapSafety > 0 && quality.gapSafety < input.params.trendMinGapSafety
+                ? `gap safety ${quality.gapSafety.toFixed(2)} below ${input.params.trendMinGapSafety.toFixed(2)}`
+                : input.params.trendMinPeakGapRatio > 0 && quality.peakGapRatio < input.params.trendMinPeakGapRatio
+                    ? `peak ratio ${quality.peakGapRatio.toFixed(2)} below ${input.params.trendMinPeakGapRatio.toFixed(2)}`
+                    : input.params.trendMaxSpread > 0 && spread > input.params.trendMaxSpread
+                        ? `spread ${spread.toFixed(3)} above ${input.params.trendMaxSpread.toFixed(3)}`
+                        : undefined;
+        if (rejectedReason) {
+            return { quotes: [], state: { ...state, candidateLeg: undefined, candidateSinceMs: undefined }, reason: `trend-pullback waiting: ${rejectedReason}` };
         }
 
         const candidateSinceMs = state.candidateLeg === candidateLeg && state.candidateSinceMs !== undefined
@@ -106,6 +148,39 @@ export function buildBtc5mTrendPullbackOrders(input: Btc5mTrendPullbackInput): B
         state = { ...state, cancelled: true };
         return { quotes: [], state, reason: `trend-pullback cancelled: BTC reversed ${btcReversalBps.toFixed(2)}bps` };
     }
+    const quality = calculateBtcTrendQuality({ timestampMs: input.timestampMs, leg, openPrice: input.openPrice, btcPrice: input.btcPrice, history: input.history, atrLookbackSeconds: input.params.trendAtrLookbackSeconds, atrFloorUsd: input.params.trendAtrFloorUsd });
+    if (input.params.btcDirectionRequired && quality.directionalGap <= 0) {
+        state = { ...state, cancelled: true };
+        return { quotes: [], state, reason: "trend-pullback cancelled: BTC direction reversed" };
+    }
+    if (input.params.trendMinPeakGapRatio > 0 && quality.peakGapRatio < input.params.trendMinPeakGapRatio) {
+        state = { ...state, cancelled: true };
+        return { quotes: [], state, reason: `trend-pullback cancelled: peak ratio ${quality.peakGapRatio.toFixed(2)}` };
+    }
+    const ask = leg === "UP" ? input.upAsk : input.downAsk;
+    if (ask === undefined) return { quotes: [], state, reason: "trend-pullback waiting for ask" };
+    if (input.params.waitForPullbackTouch && ask > input.params.entryPrice) {
+        return { quotes: [], state, reason: `trend-pullback armed: waiting for ask<=${input.params.entryPrice.toFixed(2)}` };
+    }
+    const activity = calculateBtcActivity(input.history, input.timestampMs, input.params.trendAtrLookbackSeconds);
+    if ((input.params.minBtcRangeUsd > 0 && activity.rangeUsd < input.params.minBtcRangeUsd)
+        || (input.params.minBtcUniquePrices > 0 && activity.uniquePrices < input.params.minBtcUniquePrices)
+        || (input.params.maxBtcUnchangedSeconds > 0 && activity.unchangedSeconds > input.params.maxBtcUnchangedSeconds)) {
+        if (input.params.waitForPullbackTouch) {
+            return { quotes: [], state, reason: `trend-pullback touch rejected: inactive BTC range=${activity.rangeUsd.toFixed(2)} unique=${activity.uniquePrices} unchanged=${activity.unchangedSeconds.toFixed(1)}s` };
+        }
+        state = { ...state, cancelled: true };
+        return { quotes: [], state, reason: `trend-pullback cancelled: inactive BTC range=${activity.rangeUsd.toFixed(2)} unique=${activity.uniquePrices} unchanged=${activity.unchangedSeconds.toFixed(1)}s` };
+    }
+    if (input.params.waitForPullbackTouch && input.params.maxTouchDrop > 0) {
+        const previous = [...(input.history ?? [])].reverse().find((point) => point.t < input.timestampMs);
+        const previousAsk = leg === "UP" ? previous?.upAsk : previous?.downAsk;
+        const touchDrop = previousAsk === undefined ? 0 : previousAsk - ask;
+        if (touchDrop > input.params.maxTouchDrop) {
+            state = { ...state, cancelled: true };
+            return { quotes: [], state, reason: `trend-pullback cancelled: ask dropped ${touchDrop.toFixed(2)} in one tick` };
+        }
+    }
     const spent = leg === "UP" ? input.spentUp : input.spentDown;
     const budgetLeft = input.params.maxUsdcPerLeg > 0
         ? Math.max(0, input.params.maxUsdcPerLeg - spent)
@@ -115,14 +190,15 @@ export function buildBtc5mTrendPullbackOrders(input: Btc5mTrendPullbackInput): B
         return { quotes: [], state, reason: "trend-pullback max exposure reached" };
     }
 
+    const executionPrice = input.params.waitForPullbackTouch ? Math.min(input.params.entryPrice, ask) : input.params.entryPrice;
     return {
         quotes: [{
             key: `${leg}:BUY`,
             leg,
             side: "BUY",
-            price: input.params.entryPrice,
-            size: cost / input.params.entryPrice,
-            note: `trend-pullback ${input.params.triggerPrice.toFixed(2)}->${input.params.entryPrice.toFixed(2)}`,
+            price: executionPrice,
+            size: cost / executionPrice,
+            note: `trend-pullback ${input.params.triggerPrice.toFixed(2)}->${executionPrice.toFixed(2)} gapSafety=${quality.gapSafety.toFixed(2)} peakRatio=${quality.peakGapRatio.toFixed(2)} btcRange=${activity.rangeUsd.toFixed(2)}`,
         }],
         state,
         reason: `trend-pullback ${leg} pending at ${input.params.entryPrice.toFixed(2)}`,

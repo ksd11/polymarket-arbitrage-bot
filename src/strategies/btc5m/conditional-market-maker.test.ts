@@ -19,6 +19,9 @@ const conditionalParams: Btc5mConditionalMarketMakerParams = {
     minOrderUsdc: 1,
     minOrderShares: 5,
     minSellProfit: 0.01,
+    forceFlattenSecondsBeforeEnd: 15,
+    maxUnpairedSeconds: 5,
+    pairOrderMaxAgeSeconds: 30,
 };
 
 function input(prices: number[]) {
@@ -32,7 +35,7 @@ function input(prices: number[]) {
         down: { bestBid: 0.49, bestAsk: 0.51, mid: 0.50 },
         secondsLeft: 120,
         params: { quoteShares: 5, maxUsdcPerLeg: 20, maxInventoryShares: 20, quoteSpread: 0.06, minLockedEdge: 0.02, inventorySkewPerShare: 0.002, enableSellExcess: false, minSecondsLeftToQuote: 30, tick: 0.01 },
-        state: { qUp: 0, qDown: 0, buyCostUp: 0, buyCostDown: 0, positionCostUp: 0, positionCostDown: 0 },
+        state: { qUp: 0, qDown: 0, buyCostUp: 0, buyCostDown: 0, positionCostUp: 0, positionCostDown: 0, entryAttempted: false, unpairedSinceMs: undefined as number | undefined },
     };
 }
 
@@ -77,23 +80,71 @@ test("does not leave an orphan buy when the other leg is below minimum shares", 
     assert.equal(decision.quotes.some((quote) => quote.side === "BUY"), false);
 });
 
-test("does not quote a sell below remaining average cost plus profit", () => {
+test("prefers a locked hedge over selling one-sided inventory", () => {
     const value = input([100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100]);
     value.params.enableSellExcess = true;
     value.state.qDown = 5;
     value.state.positionCostDown = 3;
     const decision = buildBtc5mConditionalMarketMakerQuotes(value);
-    const sell = decision.quotes.find((quote) => quote.leg === "DOWN" && quote.side === "SELL");
-    assert.equal(sell?.price, 0.61);
-    assert.match(sell?.note ?? "", /cost-protected sell/);
+    assert.equal(decision.quotes.length, 1);
+    assert.equal(decision.quotes[0].leg, "UP");
+    assert.equal(decision.quotes[0].side, "BUY");
+    assert.equal(decision.quotes[0].price, 0.38);
 });
 
-test("keeps a protected sell while rapid movement blocks new buys", () => {
+test("keeps the hedge while rapid movement blocks ordinary buys", () => {
     const value = input([100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100.02, 100.08, 100.12]);
     value.params.enableSellExcess = true;
     value.state.qDown = 5;
     value.state.positionCostDown = 3;
     const decision = buildBtc5mConditionalMarketMakerQuotes(value);
+    assert.equal(decision.quotes.length, 1);
+    assert.equal(decision.quotes[0].leg, "UP");
+    assert.equal(decision.quotes[0].side, "BUY");
+    assert.equal(decision.quotes[0].price, 0.38);
+});
+
+test("keeps an aggressive profitable hedge while inventory is one-sided", () => {
+    const value = input([100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100]);
+    value.params.maxUsdcPerLeg = 5;
+    value.state.qUp = 5;
+    value.state.positionCostUp = 1.85;
+    const decision = buildBtc5mConditionalMarketMakerQuotes(value);
+    assert.equal(decision.quotes.length, 1);
+    assert.equal(decision.quotes[0].leg, "DOWN");
+    assert.equal(decision.quotes[0].side, "BUY");
+    assert.equal(decision.quotes[0].price, 0.61);
+});
+
+test("forces the cheaper exit before settlement", () => {
+    const value = input([100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100]);
+    value.secondsLeft = 10;
+    value.state.qUp = 5;
+    value.state.positionCostUp = 1.85;
+    value.up = { bestBid: 0.35, bestAsk: 0.36, mid: 0.355 };
+    value.down = { bestBid: 0.64, bestAsk: 0.65, mid: 0.645 };
+    const decision = buildBtc5mConditionalMarketMakerQuotes(value);
+    assert.equal(decision.quotes.length, 1);
+    assert.equal(decision.quotes[0].leg, "UP");
+    assert.equal(decision.quotes[0].side, "SELL");
+    assert.equal(decision.quotes[0].price, 0.35);
+});
+
+test("does not enter again after the cycle attempted one pair", () => {
+    const value = input([100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100]);
+    value.state.entryAttempted = true;
+    const decision = buildBtc5mConditionalMarketMakerQuotes(value);
     assert.equal(decision.quotes.some((quote) => quote.side === "BUY"), false);
-    assert.equal(decision.quotes.find((quote) => quote.side === "SELL")?.price, 0.61);
+});
+
+test("stops out one-sided inventory after the pairing timeout", () => {
+    const value = input([100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100, 100.01, 100]);
+    value.state.qUp = 5;
+    value.state.positionCostUp = 1.85;
+    value.state.unpairedSinceMs = value.timestampMs - 6000;
+    value.up = { bestBid: 0.35, bestAsk: 0.36, mid: 0.355 };
+    value.down = { bestBid: 0.64, bestAsk: 0.65, mid: 0.645 };
+    const decision = buildBtc5mConditionalMarketMakerQuotes(value);
+    assert.equal(decision.quotes[0].side, "SELL");
+    assert.match(decision.quotes[0].note ?? "", /emergency flatten/);
 });

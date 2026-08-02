@@ -19,6 +19,7 @@ import {
 import { waitForMinimumUsdcBalance } from "./utils/balance";
 import { setupConsoleFileLogging } from "./utils/console-file";
 import { logger } from "./utils/logger";
+import { Btc5mRegimeSnapshot } from "./strategies/btc5m/regime";
 
 type Leg = "UP" | "DOWN";
 
@@ -72,7 +73,7 @@ type CycleAccounting = {
 
 const RECORD_HEADERS = [
     "row_type", "timestamp", "timestamp_ms", "slug", "condition_id", "dry_run",
-    "btc_price", "btc_source", "seconds_left",
+    "btc_price", "open_price", "btc_source", "seconds_left",
     "up_bid", "up_ask", "up_mid", "down_bid", "down_ask", "down_mid",
     "trigger_price", "entry_price", "order_usdc", "max_order_age_seconds", "max_btc_reversal_bps",
     "post_fill_stop_loss_price", "post_fill_take_profit_price", "post_fill_max_btc_reversal_bps",
@@ -120,15 +121,27 @@ function loadConfig(): TrendPullbackConfig {
         btcPriceRefreshMs: envNumber("TREND_PULLBACK_BTC_PRICE_REFRESH_MS", envNumber("BTC5M_BTC_PRICE_REFRESH_MS", defaultBtc.refreshIntervalMs)),
         btcPriceMaxStaleMs: envNumber("TREND_PULLBACK_BTC_PRICE_MAX_STALE_MS", envNumber("BTC5M_BTC_PRICE_MAX_STALE_MS", defaultBtc.maxStalenessMs)),
         btcPriceUrls: parseList(envString("TREND_PULLBACK_BTC_PRICE_URLS", defaultBtc.urls.join("|"))),
-        triggerPrice: envNumber("TREND_PULLBACK_TRIGGER_PRICE", 0.85),
-        entryPrice: envNumber("TREND_PULLBACK_ENTRY_PRICE", 0.80),
+        triggerPrice: envNumber("TREND_PULLBACK_TRIGGER_PRICE", 0.90),
+        entryPrice: envNumber("TREND_PULLBACK_ENTRY_PRICE", 0.85),
         orderUsdc: envNumber("TREND_PULLBACK_ORDER_USDC", 1.6),
         maxUsdcPerLeg: envNumber("TREND_PULLBACK_MAX_USDC_PER_LEG", 1.6),
-        minSecondsLeftToTrigger: envNumber("TREND_PULLBACK_MIN_SECONDS_LEFT_TO_TRIGGER", 30),
-        minSecondsLeftToFill: envNumber("TREND_PULLBACK_MIN_SECONDS_LEFT_TO_FILL", 0),
-        triggerConfirmSeconds: envNumber("TREND_PULLBACK_TRIGGER_CONFIRM_SECONDS", 0),
-        maxOrderAgeSeconds: envNumber("TREND_PULLBACK_MAX_ORDER_AGE_SECONDS", 8),
-        maxBtcReversalBps: envNumber("TREND_PULLBACK_MAX_BTC_REVERSAL_BPS", 2),
+        minSecondsLeftToTrigger: envNumber("TREND_PULLBACK_MIN_SECONDS_LEFT_TO_TRIGGER", 60),
+        maxSecondsLeftToTrigger: envNumber("TREND_PULLBACK_MAX_SECONDS_LEFT_TO_TRIGGER", 180),
+        minSecondsLeftToFill: envNumber("TREND_PULLBACK_MIN_SECONDS_LEFT_TO_FILL", 20),
+        triggerConfirmSeconds: envNumber("TREND_PULLBACK_TRIGGER_CONFIRM_SECONDS", 2),
+        maxOrderAgeSeconds: envNumber("TREND_PULLBACK_MAX_ORDER_AGE_SECONDS", 30),
+        maxBtcReversalBps: envNumber("TREND_PULLBACK_MAX_BTC_REVERSAL_BPS", 3),
+        btcDirectionRequired: envBool("TREND_PULLBACK_BTC_DIRECTION_REQUIRED", true),
+        trendAtrLookbackSeconds: envNumber("TREND_PULLBACK_TREND_ATR_LOOKBACK_SECONDS", 14),
+        trendAtrFloorUsd: envNumber("TREND_PULLBACK_TREND_ATR_FLOOR_USD", 0.50),
+        trendMinGapSafety: envNumber("TREND_PULLBACK_TREND_MIN_GAP_SAFETY", 20),
+        trendMinPeakGapRatio: envNumber("TREND_PULLBACK_TREND_MIN_PEAK_GAP_RATIO", 0.80),
+        trendMaxSpread: envNumber("TREND_PULLBACK_TREND_MAX_SPREAD", 0.03),
+        minBtcRangeUsd: envNumber("TREND_PULLBACK_MIN_BTC_RANGE_USD", 0.50),
+        minBtcUniquePrices: envNumber("TREND_PULLBACK_MIN_BTC_UNIQUE_PRICES", 3),
+        maxBtcUnchangedSeconds: envNumber("TREND_PULLBACK_MAX_BTC_UNCHANGED_SECONDS", 5),
+        waitForPullbackTouch: envBool("TREND_PULLBACK_WAIT_FOR_TOUCH", true),
+        maxTouchDrop: envNumber("TREND_PULLBACK_MAX_TOUCH_DROP", 0.05),
         postFillStopLossPrice: envNumber("TREND_PULLBACK_POST_FILL_STOP_LOSS_PRICE", 0),
         postFillTakeProfitPrice: envNumber("TREND_PULLBACK_POST_FILL_TAKE_PROFIT_PRICE", 0),
         postFillMaxBtcReversalBps: envNumber("TREND_PULLBACK_POST_FILL_MAX_BTC_REVERSAL_BPS", 0),
@@ -141,8 +154,9 @@ function loadConfig(): TrendPullbackConfig {
     if (!(cfg.entryPrice > 0 && cfg.entryPrice < cfg.triggerPrice)) throw new Error("TREND_PULLBACK_ENTRY_PRICE must be below trigger price");
     if (cfg.orderUsdc <= 0) throw new Error("TREND_PULLBACK_ORDER_USDC must be > 0");
     if (cfg.maxUsdcPerLeg < cfg.orderUsdc) throw new Error("TREND_PULLBACK_MAX_USDC_PER_LEG must be >= TREND_PULLBACK_ORDER_USDC");
-    if (cfg.minSecondsLeftToTrigger < 0 || cfg.minSecondsLeftToFill < 0 || cfg.cancelSecondsBeforeEnd < 0) throw new Error("Trend-pullback time settings must be >= 0");
+    if (cfg.minSecondsLeftToTrigger < 0 || cfg.maxSecondsLeftToTrigger <= cfg.minSecondsLeftToTrigger || cfg.minSecondsLeftToFill < 0 || cfg.cancelSecondsBeforeEnd < 0) throw new Error("Trend-pullback time settings are invalid");
     if (cfg.triggerConfirmSeconds < 0 || cfg.maxOrderAgeSeconds < 0 || cfg.maxBtcReversalBps < 0) throw new Error("Trend-pullback guard settings must be >= 0");
+    if (cfg.trendAtrLookbackSeconds <= 0 || cfg.trendAtrFloorUsd < 0 || cfg.trendMinGapSafety < 0 || cfg.trendMinPeakGapRatio < 0 || cfg.trendMinPeakGapRatio > 1 || cfg.trendMaxSpread < 0 || cfg.minBtcRangeUsd < 0 || cfg.minBtcUniquePrices < 0 || cfg.maxBtcUnchangedSeconds < 0 || cfg.maxTouchDrop < 0) throw new Error("Trend-pullback quality settings are invalid");
     if (!(cfg.postFillStopLossPrice >= 0 && cfg.postFillStopLossPrice < cfg.entryPrice)) throw new Error("TREND_PULLBACK_POST_FILL_STOP_LOSS_PRICE must be >= 0 and below entry price");
     if (!(cfg.postFillTakeProfitPrice >= 0 && cfg.postFillTakeProfitPrice <= 1)) throw new Error("TREND_PULLBACK_POST_FILL_TAKE_PROFIT_PRICE must be between 0 and 1");
     if (cfg.postFillMaxBtcReversalBps < 0) throw new Error("TREND_PULLBACK_POST_FILL_MAX_BTC_REVERSAL_BPS must be >= 0");
@@ -245,6 +259,8 @@ class BtcFiveMinuteTrendPullbackBot {
     private entryExpiryTimer: NodeJS.Timeout | null = null;
     private spentUp = 0;
     private spentDown = 0;
+    private btcOpenPrice: number | undefined;
+    private history: Btc5mRegimeSnapshot[] = [];
     private timers: NodeJS.Timeout[] = [];
     private stopped = false;
     private evaluating = false;
@@ -304,6 +320,8 @@ class BtcFiveMinuteTrendPullbackBot {
         this.accounting = null;
         this.spentUp = 0;
         this.spentDown = 0;
+        this.btcOpenPrice = undefined;
+        this.history = [];
     }
 
     private async initializeCurrentCycle(): Promise<void> {
@@ -338,6 +356,10 @@ class BtcFiveMinuteTrendPullbackBot {
 
             const btcSnapshot = this.btcPrice.getSnapshot();
             const btcPrice = this.btcPrice.getPrice();
+            if (btcPrice !== null && this.btcOpenPrice === undefined) this.btcOpenPrice = btcPrice;
+            if (btcPrice !== null && (this.history.length === 0 || now - this.history[this.history.length - 1].t >= 900)) {
+                this.history.push({ t: now, upAsk: up.bestAsk, downAsk: down.bestAsk, btcPrice });
+            }
             await this.maybeFillDryRun(now, up.bestAsk, down.bestAsk);
 
             if (this.cfg.maxBtcReversalBps > 0 && btcPrice === null) {
@@ -354,6 +376,8 @@ class BtcFiveMinuteTrendPullbackBot {
                 upBid: up.bestBid ?? undefined,
                 downBid: down.bestBid ?? undefined,
                 btcPrice: btcPrice ?? undefined,
+                openPrice: this.btcOpenPrice,
+                history: this.history,
                 spentUp: this.spentUp,
                 spentDown: this.spentDown,
                 state: this.state,
@@ -616,6 +640,7 @@ class BtcFiveMinuteTrendPullbackBot {
             condition_id: this.tokens.conditionId,
             dry_run: this.cfg.dryRun,
             btc_price: optionalNumber(btcPrice, 2),
+            open_price: optionalNumber(this.btcOpenPrice, 2),
             btc_source: btcSource,
             seconds_left: secondsLeft.toFixed(3),
             up_bid: optionalNumber(up.bestBid), up_ask: optionalNumber(up.bestAsk), up_mid: optionalNumber(up.mid),

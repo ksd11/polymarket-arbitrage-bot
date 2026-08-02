@@ -14,7 +14,7 @@ import { validatePrivateKey } from "./security/validatePrivateKey";
 import { buildBtc5mLatencyScalpOrders, Btc5mLatencyScalpParams, Btc5mLatencyScalpState } from "./strategies/btc5m/latency-scalp";
 import { buildBtc5mDeepReboundOrders, Btc5mDeepReboundParams } from "./strategies/btc5m/deep-rebound";
 import { buildBtc5mFinal30HighOrders, Btc5mFinal30HighParams } from "./strategies/btc5m/final-30-high";
-import { buildBtc5mFinal30ManagedOrders, Btc5mFinal30ManagedParams, Btc5mFinal30ManagedPosition } from "./strategies/btc5m/final-30-managed";
+import { buildBtc5mFinal30ManagedOrders, Btc5mFinal30ManagedParams, Btc5mFinal30ManagedPosition, final30ManagedDirectionalMarginBps, final30ManagedSession } from "./strategies/btc5m/final-30-managed";
 import { buildDynamicRangeHedgePlan, Btc5mDynamicRangePairPlan, Btc5mDynamicRangePullbackParams, Btc5mDynamicRangePullbackState } from "./strategies/btc5m/dynamic-range-pullback";
 import { buildBtc5mDynamicRangeFinalManagedOrders, Btc5mDynamicRangeFinalManagedDecision } from "./strategies/btc5m/dynamic-range-final-managed";
 import { Btc5mRegimeSnapshot } from "./strategies/btc5m/regime";
@@ -195,7 +195,17 @@ function loadConfig(): RunnerConfig {
             minSecondsLeftToOpen: envNumber("FINAL_30_MANAGED_MIN_SECONDS_LEFT_TO_OPEN", envNumber("FINAL_30_HIGH_MIN_SECONDS_LEFT_TO_OPEN", 0)),
             earlyBtcMinMoveUsd: envNumber("FINAL_30_MANAGED_EARLY_BTC_MIN_MOVE_USD", 0),
             earlyBtcMinAsk: envNumber("FINAL_30_MANAGED_EARLY_BTC_MIN_ASK", 0.85),
-            earlyBtcMaxSecondsLeftToOpen: envNumber("FINAL_30_MANAGED_EARLY_BTC_MAX_SECONDS_LEFT", 60),
+            earlyBtcMaxSecondsLeftToOpen: envNumber("FINAL_30_MANAGED_EARLY_BTC_MAX_SECONDS_LEFT", 90),
+            btcDirectionRequired: envBool("FINAL_30_MANAGED_BTC_DIRECTION_REQUIRED", true),
+            trendAtrLookbackSeconds: envNumber("FINAL_30_MANAGED_TREND_ATR_LOOKBACK_SECONDS", 14),
+            trendMinGapSafety: envNumber("FINAL_30_MANAGED_TREND_MIN_GAP_SAFETY", 0),
+            trendMinPeakGapRatio: envNumber("FINAL_30_MANAGED_TREND_MIN_PEAK_GAP_RATIO", 0.80),
+            trendMaxSpread: envNumber("FINAL_30_MANAGED_TREND_MAX_SPREAD", 0.03),
+            timezoneOffsetHours: envNumber("FINAL_30_MANAGED_TIMEZONE_OFFSET_HOURS", 8),
+            dayStartHour: envNumber("FINAL_30_MANAGED_DAY_START_HOUR", 9),
+            dayEndHour: envNumber("FINAL_30_MANAGED_DAY_END_HOUR", 21),
+            dayMinDirectionalMarginBps: envNumber("FINAL_30_MANAGED_DAY_MIN_BTC_MARGIN_BPS", 2),
+            nightMinDirectionalMarginBps: envNumber("FINAL_30_MANAGED_NIGHT_MIN_BTC_MARGIN_BPS", 1),
             takeProfitDelta: envNumber("FINAL_30_MANAGED_TAKE_PROFIT_DELTA", 0),
             stopLossDelta: envNumber("FINAL_30_MANAGED_STOP_LOSS_DELTA", 0.10),
             stopMinBtcReversalBps: envNumber("FINAL_30_MANAGED_STOP_MIN_BTC_REVERSAL_BPS", 2),
@@ -231,7 +241,7 @@ function loadConfig(): RunnerConfig {
     if (deep && !(cfg.deepParams.minEntryPrice > 0 && cfg.deepParams.minEntryPrice < cfg.deepParams.maxEntryPrice && cfg.deepParams.maxEntryPrice < 1)) throw new Error("Invalid deep-rebound prices");
     if (deep && (cfg.deepParams.orderUsdc < 1.01 || cfg.deepParams.maxUsdcPerLeg < cfg.deepParams.orderUsdc)) throw new Error("Marketable deep-rebound BUY requires DEEP_REBOUND_ORDER_USDC >= 1.01 and matching max budget");
     if (final30High && (!(cfg.final30HighParams.triggerPrice > 0.5 && cfg.final30HighParams.triggerPrice < 1 && cfg.final30HighParams.earlyTriggerPrice >= cfg.final30HighParams.triggerPrice && cfg.final30HighParams.earlyTriggerPrice <= cfg.final30HighParams.maxEntryPrice && cfg.final30HighParams.maxEntryPrice < 1) || cfg.final30HighParams.orderShares <= 0 || cfg.final30HighParams.earlyMaxSecondsLeftToOpen < cfg.final30HighParams.maxSecondsLeftToOpen)) throw new Error("Invalid FINAL_30_HIGH tiered configuration");
-    if ((final30Managed || dynamicRangeFinalManaged) && (!(cfg.final30ManagedParams.triggerPrice > 0.5 && cfg.final30ManagedParams.triggerPrice < 1 && cfg.final30ManagedParams.earlyTriggerPrice >= cfg.final30ManagedParams.triggerPrice && cfg.final30ManagedParams.earlyTriggerPrice <= cfg.final30ManagedParams.maxEntryPrice && cfg.final30ManagedParams.maxEntryPrice < 1) || cfg.final30ManagedParams.orderShares <= 0 || cfg.final30ManagedParams.earlyMaxSecondsLeftToOpen < cfg.final30ManagedParams.maxSecondsLeftToOpen || cfg.final30ManagedParams.earlyBtcMinMoveUsd < 0 || cfg.final30ManagedParams.earlyBtcMinAsk <= 0.5 || cfg.final30ManagedParams.earlyBtcMinAsk > cfg.final30ManagedParams.maxEntryPrice || cfg.final30ManagedParams.earlyBtcMaxSecondsLeftToOpen <= cfg.final30ManagedParams.maxSecondsLeftToOpen || cfg.final30ManagedParams.takeProfitDelta < 0 || cfg.final30ManagedParams.stopLossDelta < 0 || cfg.final30ManagedParams.stopMinBtcReversalBps < 0 || cfg.final30ManagedParams.stopConfirmSeconds < 0 || cfg.final30ManagedParams.stopMaxDirectionalMarginBps < 0)) throw new Error("Invalid FINAL_30_MANAGED configuration");
+    if ((final30Managed || dynamicRangeFinalManaged) && (!(cfg.final30ManagedParams.triggerPrice > 0.5 && cfg.final30ManagedParams.triggerPrice < 1 && cfg.final30ManagedParams.earlyTriggerPrice >= cfg.final30ManagedParams.triggerPrice && cfg.final30ManagedParams.earlyTriggerPrice <= cfg.final30ManagedParams.maxEntryPrice && cfg.final30ManagedParams.maxEntryPrice < 1) || cfg.final30ManagedParams.orderShares <= 0 || cfg.final30ManagedParams.earlyMaxSecondsLeftToOpen < cfg.final30ManagedParams.maxSecondsLeftToOpen || cfg.final30ManagedParams.earlyBtcMinMoveUsd < 0 || cfg.final30ManagedParams.earlyBtcMinAsk <= 0.5 || cfg.final30ManagedParams.earlyBtcMinAsk > cfg.final30ManagedParams.maxEntryPrice || cfg.final30ManagedParams.earlyBtcMaxSecondsLeftToOpen <= cfg.final30ManagedParams.maxSecondsLeftToOpen || cfg.final30ManagedParams.trendAtrLookbackSeconds <= 0 || cfg.final30ManagedParams.trendMinGapSafety < 0 || cfg.final30ManagedParams.trendMinPeakGapRatio < 0 || cfg.final30ManagedParams.trendMinPeakGapRatio > 1 || cfg.final30ManagedParams.trendMaxSpread < 0 || !Number.isInteger(cfg.final30ManagedParams.timezoneOffsetHours) || cfg.final30ManagedParams.timezoneOffsetHours < -23 || cfg.final30ManagedParams.timezoneOffsetHours > 23 || !Number.isInteger(cfg.final30ManagedParams.dayStartHour) || cfg.final30ManagedParams.dayStartHour < 0 || cfg.final30ManagedParams.dayStartHour > 23 || !Number.isInteger(cfg.final30ManagedParams.dayEndHour) || cfg.final30ManagedParams.dayEndHour < 0 || cfg.final30ManagedParams.dayEndHour > 23 || cfg.final30ManagedParams.dayStartHour === cfg.final30ManagedParams.dayEndHour || cfg.final30ManagedParams.dayMinDirectionalMarginBps < 0 || cfg.final30ManagedParams.nightMinDirectionalMarginBps < 0 || cfg.final30ManagedParams.takeProfitDelta < 0 || cfg.final30ManagedParams.stopLossDelta < 0 || cfg.final30ManagedParams.stopMinBtcReversalBps < 0 || cfg.final30ManagedParams.stopConfirmSeconds < 0 || cfg.final30ManagedParams.stopMaxDirectionalMarginBps < 0)) throw new Error("Invalid FINAL_30_MANAGED configuration");
     const dynamic = cfg.dynamicRangePullbackParams;
     if (dynamicRangeFinalManaged && (!(dynamic.minContractPullback > 0 && dynamic.minContractPullback < 1) || dynamic.minOrderNotional <= 0 || dynamic.orderShares <= 0 || dynamic.maxPairUsdc < dynamic.minOrderNotional * 2 || dynamic.minLockedProfit < 0 || dynamic.shareStep <= 0 || dynamic.maxSecondsLeftToOpen <= dynamic.minSecondsLeftToOpen || dynamic.maxSpread <= 0 || dynamic.entryConfirmSeconds < 0 || !(dynamic.earlyPairCost > 0 && dynamic.earlyPairCost <= dynamic.middlePairCost && dynamic.middlePairCost <= dynamic.latePairCost && dynamic.latePairCost < 1) || dynamic.stopLossDelta <= 0 || dynamic.stopConfirmSeconds < 0 || dynamic.maxNakedSeconds < 0)) throw new Error("Invalid DYNAMIC_RANGE_PULLBACK configuration");
     if ((deep ? cfg.deepParams.orderUsdc : cfg.params.orderUsdc) <= 0 || cfg.evaluationIntervalMs < 50 || cfg.orderPollIntervalMs < 100 || cfg.orderRetryIntervalMs < 250 || cfg.entryMaxAgeSeconds <= 0) throw new Error("Invalid scalp budget or intervals");
@@ -292,7 +302,7 @@ class LatencyScalpBot {
             : this.cfg.mode === "final-30-high"
                 ? `ask>=${this.cfg.final30HighParams.earlyTriggerPrice} until ${this.cfg.final30HighParams.earlyMaxSecondsLeftToOpen}s, then >=${this.cfg.final30HighParams.triggerPrice} in final ${this.cfg.final30HighParams.maxSecondsLeftToOpen}s, max=${this.cfg.final30HighParams.maxEntryPrice}, shares=${this.cfg.final30HighParams.orderShares}`
                 : this.cfg.mode === "final-30-managed"
-                    ? `ask>=${this.cfg.final30ManagedParams.triggerPrice} in final ${this.cfg.final30ManagedParams.maxSecondsLeftToOpen}s, max=${this.cfg.final30ManagedParams.maxEntryPrice}, shares=${this.cfg.final30ManagedParams.orderShares}, takeProfitDelta=${this.cfg.final30ManagedParams.takeProfitDelta}, stopLossDelta=${this.cfg.final30ManagedParams.stopLossDelta}, btcReversal=${this.cfg.final30ManagedParams.stopMinBtcReversalBps}bps/${this.cfg.final30ManagedParams.stopConfirmSeconds}s`
+                    ? `ask>=${this.cfg.final30ManagedParams.triggerPrice} in final ${this.cfg.final30ManagedParams.maxSecondsLeftToOpen}s, max=${this.cfg.final30ManagedParams.maxEntryPrice}, shares=${this.cfg.final30ManagedParams.orderShares}, BTC margin day=${this.cfg.final30ManagedParams.dayMinDirectionalMarginBps}bps/night=${this.cfg.final30ManagedParams.nightMinDirectionalMarginBps}bps (${this.cfg.final30ManagedParams.dayStartHour}:00-${this.cfg.final30ManagedParams.dayEndHour}:00 UTC${this.cfg.final30ManagedParams.timezoneOffsetHours >= 0 ? "+" : ""}${this.cfg.final30ManagedParams.timezoneOffsetHours}), entryMaxAge=${this.cfg.entryMaxAgeSeconds}s, takeProfitDelta=${this.cfg.final30ManagedParams.takeProfitDelta}, stopLossDelta=${this.cfg.final30ManagedParams.stopLossDelta}, btcReversal=${this.cfg.final30ManagedParams.stopMinBtcReversalBps}bps/${this.cfg.final30ManagedParams.stopConfirmSeconds}s`
                 : this.cfg.mode === "dynamic-range-final-managed"
                     ? `dynamicPullback>=${this.cfg.dynamicRangePullbackParams.minContractPullback}, syntheticSell=${this.cfg.dynamicRangePullbackParams.syntheticSell}, dynamicSizing=${this.cfg.dynamicRangePullbackParams.dynamicSizing}, dynamicPairCap=${this.cfg.dynamicRangePullbackParams.maxPairUsdc}, dynamicLockedProfit>=${this.cfg.dynamicRangePullbackParams.minLockedProfit}, finalTrigger=${this.cfg.final30ManagedParams.triggerPrice}, finalShares=${this.cfg.final30ManagedParams.orderShares}`
                 : `signal=${p.minSignalPrice}-${p.entryPrice}, momentum=${p.minContractMomentum}, entry=${p.entryPrice}, takeProfit=${p.takeProfitPrice}`;
@@ -360,7 +370,26 @@ class LatencyScalpBot {
             await this.fillDryOrders(now, up.bestAsk, down.bestAsk, up.bestBid ?? undefined, down.bestBid ?? undefined);
             if (btcPrice !== undefined && (this.history.length === 0 || now - this.history[this.history.length - 1].t >= 250)) {
                 this.history.push({ t: now, upAsk: up.bestAsk, downAsk: down.bestAsk, btcPrice });
-                const cutoff = now - 60_000; while (this.history.length > 0 && this.history[0].t < cutoff) this.history.shift();
+                const cutoff = now - this.cfg.intervalMinutes * 60_000; while (this.history.length > 0 && this.history[0].t < cutoff) this.history.shift();
+            }
+            if (this.cfg.mode === "final-30-managed" && this.active(this.entryOrder)) {
+                const session = final30ManagedSession(now, this.cfg.final30ManagedParams);
+                const marginBps = final30ManagedDirectionalMarginBps(this.entryOrder!.leg, this.btcOpenPrice, btcPrice);
+                const ageSeconds = (now - this.entryOrder!.placedAtMs) / 1000;
+                const stale = ageSeconds >= this.cfg.entryMaxAgeSeconds;
+                const invalidMargin = marginBps < session.minDirectionalMarginBps;
+                if (stale || invalidMargin) {
+                    const executionVersion = this.executionVersion;
+                    const reason = stale
+                        ? `entry refresh after ${ageSeconds.toFixed(1)}s`
+                        : `${session.name} BTC margin ${marginBps.toFixed(2)}bps below ${session.minDirectionalMarginBps.toFixed(2)}bps`;
+                    await this.cancelOrder(this.entryOrder, reason);
+                    logger.info(`Revalidating final entry: ${reason}`);
+                    if (this.executionVersion !== executionVersion) {
+                        this.recordDecision(now, secondsLeft, up, down, btcPrice, "entry filled while cancelling; recompute next tick", [], "final");
+                        return;
+                    }
+                }
             }
             const decision = this.cfg.mode === "deep-rebound"
                 ? buildBtc5mDeepReboundOrders({
@@ -381,9 +410,9 @@ class LatencyScalpBot {
                 : this.cfg.mode === "final-30-high"
                     ? buildBtc5mFinal30HighOrders({ timestampMs: now, endMs: this.tokens.endMs, upAsk: up.bestAsk, downAsk: down.bestAsk, entered: Boolean(this.state.filled || this.state.cancelled || this.active(this.entryOrder)), params: this.cfg.final30HighParams })
                     : this.cfg.mode === "final-30-managed"
-                        ? buildBtc5mFinal30ManagedOrders({ timestampMs: now, endMs: this.tokens.endMs, upAsk: up.bestAsk, downAsk: down.bestAsk, upBid: up.bestBid ?? undefined, downBid: down.bestBid ?? undefined, btcPrice, openPrice: this.btcOpenPrice, position: this.managedPosition, blocked: Boolean(this.state.cancelled || (!this.managedPosition && this.active(this.entryOrder))), params: this.cfg.final30ManagedParams })
+                        ? buildBtc5mFinal30ManagedOrders({ timestampMs: now, endMs: this.tokens.endMs, upAsk: up.bestAsk, downAsk: down.bestAsk, upBid: up.bestBid ?? undefined, downBid: down.bestBid ?? undefined, btcPrice, openPrice: this.btcOpenPrice, history: this.history, position: this.managedPosition, blocked: Boolean(this.state.cancelled || (!this.managedPosition && this.active(this.entryOrder))), params: this.cfg.final30ManagedParams })
                     : this.cfg.mode === "dynamic-range-final-managed"
-                        ? buildBtc5mDynamicRangeFinalManagedOrders({ timestampMs: now, endMs: this.tokens.endMs, upAsk: up.bestAsk, downAsk: down.bestAsk, upBid: up.bestBid ?? undefined, downBid: down.bestBid ?? undefined, btcPrice, openPrice: this.btcOpenPrice, state: this.dynamicState, params: this.cfg.dynamicRangePullbackParams, finalPosition: this.managedPosition, finalBlocked: this.finalBlocked, finalParams: this.cfg.final30ManagedParams })
+                        ? buildBtc5mDynamicRangeFinalManagedOrders({ timestampMs: now, endMs: this.tokens.endMs, upAsk: up.bestAsk, downAsk: down.bestAsk, upBid: up.bestBid ?? undefined, downBid: down.bestBid ?? undefined, btcPrice, openPrice: this.btcOpenPrice, history: this.history, state: this.dynamicState, params: this.cfg.dynamicRangePullbackParams, finalPosition: this.managedPosition, finalBlocked: this.finalBlocked, finalParams: this.cfg.final30ManagedParams })
                     : buildBtc5mLatencyScalpOrders({ timestampMs: now, endMs: this.tokens.endMs, upAsk: up.bestAsk, downAsk: down.bestAsk, upBid: up.bestBid ?? undefined, downBid: down.bestBid ?? undefined, btcPrice, openPrice: this.btcOpenPrice, state: this.state, params: this.cfg.params });
             const combinedDecision = this.cfg.mode === "dynamic-range-final-managed" ? decision as Btc5mDynamicRangeFinalManagedDecision : undefined;
             if (this.cfg.mode === "final-30-managed" && "position" in decision && decision.position) this.managedPosition = decision.position as Btc5mFinal30ManagedPosition;
@@ -419,13 +448,19 @@ class LatencyScalpBot {
             const canBuy = this.cfg.mode === "dynamic-range-final-managed" ? !this.managedPosition : !this.state.exited;
             if (quote?.side === "BUY" && canBuy && !this.active(this.entryOrder) && !this.pendingReconciliation("BUY") && now >= this.nextOrderAttemptAt) {
                 const role: Role = this.cfg.mode !== "dynamic-range-final-managed" ? "entry" : combinedDecision?.component === "final" ? "final-entry" : this.dynamicState.entryLeg ? "dynamic-hedge" : "dynamic-entry";
+                if (this.cfg.mode === "final-30-managed") logger.info(`Entry decision: ${quote.note ?? decision.reason ?? `${quote.leg} @ ${quote.price.toFixed(2)}`}`);
                 await this.placeOrder(role, quote.leg, quote.side, quote.price, quote.size, role === "dynamic-entry" ? combinedDecision?.dynamicEntryPlan : undefined);
             }
             if (quote?.side === "SELL") {
                 if (this.active(this.entryOrder)) await this.cancelOrder(this.entryOrder, "risk exit takes priority");
                 const role: Role = quote.note?.includes("take profit") || quote.note?.includes("take-profit") ? "take-profit" : "risk-exit";
+                const executionVersion = this.executionVersion;
                 if (this.active(this.exitOrder) && (this.exitOrder!.role !== role || Math.abs(this.exitOrder!.price - quote.price) > 1e-9)) await this.cancelOrder(this.exitOrder, "exit quote changed");
-                const size = this.cfg.mode === "dynamic-range-final-managed" ? Math.min(quote.size, this.availableShares(quote.leg)) : quote.size;
+                if (this.executionVersion !== executionVersion) {
+                    this.recordDecision(now, secondsLeft, up, down, btcPrice, "exit filled while cancelling; recompute next tick", [], combinedDecision?.component);
+                    return;
+                }
+                const size = Math.min(quote.size, this.availableShares(quote.leg));
                 if (!this.active(this.exitOrder) && !this.pendingReconciliation("SELL") && size > 1e-9 && now >= this.nextOrderAttemptAt) await this.placeOrder(role, quote.leg, quote.side, quote.price, size);
             }
             this.recordDecision(now, secondsLeft, up, down, btcPrice, decision.reason, decision.quotes, combinedDecision?.component);
@@ -475,8 +510,10 @@ class LatencyScalpBot {
             this.nextOrderAttemptAt = 0;
             logger.info(`Posted ${role} ${side} ${leg} ${size.toFixed(4)} @ ${price.toFixed(2)}`); this.recordOrder("order_posted", order);
         } catch (error) {
+            const errorMessage = formatError(error);
             this.nextOrderAttemptAt = Date.now() + this.cfg.orderRetryIntervalMs;
-            logger.error(`Failed to post ${role} ${side} ${leg} ${size.toFixed(4)} @ ${price.toFixed(6)}: ${formatError(error)}`);
+            logger.error(`Failed to post ${role} ${side} ${leg} ${size.toFixed(4)} @ ${price.toFixed(6)}: ${errorMessage}`);
+            this.recordOrder("order_rejected", { ...base, orderId: "", status: "FAILED" }, price, undefined, "clob", [], errorMessage);
             if ((this.cfg.mode === "final-30-high" || this.cfg.mode === "final-30-managed") && role === "entry") this.state = { ...this.state, cancelled: true };
         }
     }
@@ -557,11 +594,18 @@ class LatencyScalpBot {
                 this.dynamicState = { ...this.dynamicState, pairedShares, paired: pairedShares + 1e-9 >= (this.dynamicState.plannedHedgeShares ?? this.dynamicState.entryShares ?? pairedShares) };
             }
             if (this.cfg.mode === "final-30-managed" || (this.cfg.mode === "dynamic-range-final-managed" && order.role === "final-entry")) {
+                const previous = this.managedPosition && !this.managedPosition.exited && this.managedPosition.leg === order.leg
+                    ? this.managedPosition
+                    : undefined;
+                const positionShares = (previous?.shares ?? 0) + shares;
+                const entryPrice = positionShares > 0
+                    ? ((previous?.entryPrice ?? 0) * (previous?.shares ?? 0) + executionPrice * shares) / positionShares
+                    : executionPrice;
                 this.managedPosition = {
                     leg: order.leg,
-                    entryPrice: executionPrice,
-                    entryBtcPrice: this.managedPosition?.entryBtcPrice ?? this.lastBtcPrice,
-                    shares,
+                    entryPrice,
+                    entryBtcPrice: previous?.entryBtcPrice ?? this.lastBtcPrice,
+                    shares: positionShares,
                     exited: false,
                 };
             }
@@ -571,10 +615,14 @@ class LatencyScalpBot {
             else accounting.soldDown += shares;
             if (!this.cfg.dryRun) removeHoldings(accounting.tokens.conditionId, order.tokenId, shares);
             if (accounting !== this.accounting) return;
-            if (order.filledSize + 1e-9 >= order.size) {
+            if (this.managedPosition && this.managedPosition.leg === order.leg) {
+                const remainingShares = Math.max(0, this.managedPosition.shares - shares);
+                this.managedPosition = { ...this.managedPosition, exited: remainingShares <= 1e-9, shares: remainingShares };
+            }
+            const remainingPosition = this.availableShares(order.leg);
+            if (remainingPosition <= 1e-9) {
                 this.state = { ...this.state, exited: true };
                 if (this.cfg.mode === "dynamic-range-final-managed" && !this.managedPosition) this.dynamicState = { ...this.dynamicState, exited: true };
-                if (this.managedPosition) this.managedPosition = { ...this.managedPosition, exited: true, shares: 0 };
             }
         }
     }
@@ -678,8 +726,8 @@ class LatencyScalpBot {
         this.write({ row_type: "decision", timestamp: new Date(now).toISOString(), timestamp_ms: now, slug: this.tokens?.slug, condition_id: this.tokens?.conditionId, dry_run: this.cfg.dryRun, btc_price: optional(btcPrice, 2), open_price: optional(this.btcOpenPrice, 2), seconds_left: secondsLeft.toFixed(3), up_bid: optional(up.bestBid), up_ask: optional(up.bestAsk), down_bid: optional(down.bestBid), down_ask: optional(down.bestAsk), candidate_leg: this.state.candidateLeg, triggered_leg: this.state.triggeredLeg, state_filled: Boolean(this.state.filled), state_cancelled: Boolean(this.state.cancelled), state_exited: Boolean(this.state.exited), decision_reason: reason, quotes: quotes.map((quote) => `${quote.side} ${quote.leg}@${quote.price.toFixed(2)}x${quote.size.toFixed(4)}`).join("|"), strategy_component: component, dynamic_entry_leg: this.dynamicState.entryLeg, dynamic_entry_shares: optional(this.dynamicState.entryShares, 4), dynamic_synthetic_sell: Boolean(this.dynamicState.syntheticSell), dynamic_planned_exit_price: optional(this.dynamicState.plannedExitPrice, 2), dynamic_planned_hedge_price: optional(this.dynamicState.plannedHedgePrice, 2), dynamic_planned_hedge_shares: optional(this.dynamicState.plannedHedgeShares, 4), dynamic_planned_locked_profit: optional(this.dynamicState.plannedLockedProfit, 4), dynamic_paired: Boolean(this.dynamicState.paired), dynamic_exited: Boolean(this.dynamicState.exited), final_blocked: this.finalBlocked });
     }
 
-    private recordOrder(rowType: string, order: TrackedOrder, executionPrice = order.price, eventNotional?: number, executionSource?: string, executionIds = order.executionIds): void {
-        this.write({ row_type: rowType, timestamp: new Date().toISOString(), timestamp_ms: Date.now(), slug: order.accounting.tokens.slug, condition_id: order.accounting.tokens.conditionId, dry_run: this.cfg.dryRun, event_role: order.role, event_leg: order.leg, event_side: order.side, event_price: executionPrice.toFixed(6), event_size: order.size.toFixed(6), event_cost: (executionPrice * order.size).toFixed(6), event_notional: optional(eventNotional), execution_source: executionSource, execution_ids: executionIds.join("|"), order_id: order.orderId, order_status: order.status, filled_size: order.filledSize.toFixed(6) });
+    private recordOrder(rowType: string, order: TrackedOrder, executionPrice = order.price, eventNotional?: number, executionSource?: string, executionIds = order.executionIds, eventError?: string): void {
+        this.write({ row_type: rowType, timestamp: new Date().toISOString(), timestamp_ms: Date.now(), slug: order.accounting.tokens.slug, condition_id: order.accounting.tokens.conditionId, dry_run: this.cfg.dryRun, event_role: order.role, event_leg: order.leg, event_side: order.side, event_price: executionPrice.toFixed(6), event_size: order.size.toFixed(6), event_cost: (executionPrice * order.size).toFixed(6), event_notional: optional(eventNotional), execution_source: executionSource, execution_ids: executionIds.join("|"), order_id: order.orderId, order_status: order.status, filled_size: order.filledSize.toFixed(6), event_error: eventError });
     }
 
     private write(row: RecordRow): void { if (this.cfg.recordEnabled) appendRecord(this.cfg.recordPath, row); }

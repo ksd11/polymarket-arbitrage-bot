@@ -10,8 +10,10 @@ import {
     Btc5mFinal30ManagedPosition,
 } from "./final-30-managed";
 import { Btc5mStrategyDecision } from "./types";
+import { Btc5mRegimeSnapshot } from "./regime";
 
 export type Btc5mDynamicRangeFinalManagedInput = Btc5mDynamicRangePullbackInput & {
+    history?: Btc5mRegimeSnapshot[];
     finalPosition?: Btc5mFinal30ManagedPosition;
     finalBlocked: boolean;
     finalParams: Btc5mFinal30ManagedParams;
@@ -62,6 +64,7 @@ function buildFinalDecision(input: Btc5mDynamicRangeFinalManagedInput): Btc5mDyn
         downBid: input.downBid,
         btcPrice: input.btcPrice,
         openPrice: input.openPrice,
+        history: input.history,
         position: input.finalPosition,
         blocked: input.finalBlocked,
         params: input.finalParams,

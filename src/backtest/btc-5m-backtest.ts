@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, resolve } from "path";
-import { buildBtc5mEdgeOrders } from "../strategies/btc5m/edge";
+import { buildBtc5mEdgeOrders, fairUpProbability } from "../strategies/btc5m/edge";
 import { buildBtc5mMarketMakerQuotes } from "../strategies/btc5m/market-maker";
 import { buildBtc5mConditionalMarketMakerQuotes, Btc5mConditionalMarketMakerSample } from "../strategies/btc5m/conditional-market-maker";
 import { buildBtc5mRangeArbOrders } from "../strategies/btc5m/range-arb";
@@ -21,9 +21,11 @@ import { buildBtc5mDynamicRangePullbackOrders, Btc5mDynamicRangePullbackParams, 
 import { buildBtc5mDynamicRangeFinalManagedOrders } from "../strategies/btc5m/dynamic-range-final-managed";
 import { Btc5mRegimeSnapshot } from "../strategies/btc5m/regime";
 import { Btc5mStrategyQuote } from "../strategies/btc5m/types";
+import { buildBtc5mRangeMidReversionOrders, Btc5mRangeMidPosition, Btc5mRangeMidSample } from "../strategies/btc5m/range-mid-reversion";
+import { Btc5mConditionalReboundFeatures, Btc5mConditionalReboundTrainingSample, predictBtc5mConditionalRebound, trainBtc5mConditionalReboundModel } from "../strategies/btc5m/conditional-rebound";
 
 type Leg = "UP" | "DOWN";
-type BacktestStrategy = "edge" | "range-arb" | "market-maker" | "conditional-market-maker" | "hybrid" | "managed-edge" | "adaptive-edge" | "trend-pullback" | "trend-range-switch" | "trend-range-regime" | "trend-range-overlay" | "adaptive-overlay" | "sustained-high" | "latency-scalp" | "deep-rebound" | "extreme-020-rebound" | "final-30-high" | "final-30-hedged" | "final-30-managed" | "dynamic-range-pullback" | "dynamic-range-final-managed";
+type BacktestStrategy = "edge" | "range-arb" | "range-mid-reversion" | "conditional-rebound" | "market-maker" | "conditional-market-maker" | "hybrid" | "managed-edge" | "adaptive-edge" | "trend-pullback" | "trend-range-switch" | "trend-range-regime" | "trend-range-overlay" | "adaptive-overlay" | "sustained-high" | "latency-scalp" | "deep-rebound" | "extreme-020-rebound" | "final-30-high" | "final-30-hedged" | "final-30-managed" | "dynamic-range-pullback" | "dynamic-range-final-managed";
 
 type BacktestConfig = {
     strategy: BacktestStrategy;
@@ -40,12 +42,33 @@ type BacktestConfig = {
     maxPrice: number;
     rangePriceX: number;
     rangeUsdcPerLeg: number;
+    rangeMidObserveSeconds: number;
+    rangeMidProfitDelta: number;
+    rangeMidMaxHoldSeconds: number;
+    rangeMidForceExitSecondsLeft: number;
+    rangeMidMinSecondsLeftToOpen: number;
+    rangeMidMinMidCrosses: number;
+    rangeMidShares: number;
+    conditionalReboundTrainRatio: number;
+    conditionalReboundLookbackSeconds: number;
+    conditionalReboundHorizonSeconds: number;
+    conditionalReboundSampleIntervalSeconds: number;
+    conditionalReboundTakeProfitDelta: number;
+    conditionalReboundStopLossDelta: number;
+    conditionalReboundMinProbability: number;
+    conditionalReboundMinExpectedPnl: number;
+    conditionalReboundShares: number;
+    conditionalReboundMinSecondsLeft: number;
+    conditionalReboundMaxSecondsLeft: number;
+    conditionalReboundMinAsk: number;
+    conditionalReboundMaxAsk: number;
     marketMakerQuoteShares: number;
     marketMakerQuoteSpread: number;
     marketMakerMinLockedEdge: number;
     marketMakerInventorySkewPerShare: number;
     marketMakerMaxUsdcPerLeg: number;
     marketMakerMaxInventoryShares: number;
+    marketMakerCancelSecondsBeforeEnd: number;
     conditionalMmLookbackSeconds: number;
     conditionalMmAccelerationLookbackSeconds: number;
     conditionalMmMaxRangeBps: number;
@@ -62,6 +85,9 @@ type BacktestConfig = {
     conditionalMmMinOrderUsdc: number;
     conditionalMmMinOrderShares: number;
     conditionalMmMinSellProfit: number;
+    conditionalMmForceFlattenSecondsBeforeEnd: number;
+    conditionalMmMaxUnpairedSeconds: number;
+    conditionalMmPairOrderMaxAgeSeconds: number;
     // Hybrid params
     hybridLookbackSeconds: number;
     hybridOscillationThreshold: number;
@@ -105,10 +131,22 @@ type BacktestConfig = {
     trendPullbackOrderUsdc: number;
     trendPullbackMaxUsdcPerLeg: number;
     trendPullbackMinSecondsLeftToTrigger: number;
+    trendPullbackMaxSecondsLeftToTrigger: number;
     trendPullbackMinSecondsLeftToFill: number;
     trendPullbackTriggerConfirmSeconds: number;
     trendPullbackMaxOrderAgeSeconds: number;
     trendPullbackMaxBtcReversalBps: number;
+    trendPullbackBtcDirectionRequired: boolean;
+    trendPullbackTrendAtrLookbackSeconds: number;
+    trendPullbackTrendAtrFloorUsd: number;
+    trendPullbackTrendMinGapSafety: number;
+    trendPullbackTrendMinPeakGapRatio: number;
+    trendPullbackTrendMaxSpread: number;
+    trendPullbackMinBtcRangeUsd: number;
+    trendPullbackMinBtcUniquePrices: number;
+    trendPullbackMaxBtcUnchangedSeconds: number;
+    trendPullbackWaitForTouch: boolean;
+    trendPullbackMaxTouchDrop: number;
     trendPullbackPostFillStopLossPrice: number;
     trendPullbackPostFillTakeProfitPrice: number;
     trendPullbackPostFillMaxBtcReversalBps: number;
@@ -184,6 +222,16 @@ type BacktestConfig = {
     final30ManagedEarlyBtcMinMoveUsd: number;
     final30ManagedEarlyBtcMinAsk: number;
     final30ManagedEarlyBtcMaxSecondsLeft: number;
+    final30ManagedBtcDirectionRequired: boolean;
+    final30ManagedTrendAtrLookbackSeconds: number;
+    final30ManagedTrendMinGapSafety: number;
+    final30ManagedTrendMinPeakGapRatio: number;
+    final30ManagedTrendMaxSpread: number;
+    final30ManagedTimezoneOffsetHours: number;
+    final30ManagedDayStartHour: number;
+    final30ManagedDayEndHour: number;
+    final30ManagedDayMinDirectionalMarginBps: number;
+    final30ManagedNightMinDirectionalMarginBps: number;
     final30ManagedTakeProfitDelta: number;
     final30ManagedStopLossDelta: number;
     final30ManagedStopMinBtcReversalBps: number;
@@ -277,7 +325,7 @@ function envNumber(name: string, fallback: number): number {
 function usage(): string {
     return [
         "Usage:",
-        "  npm run backtest:btc5m -- --strategy <edge|managed-edge|adaptive-edge|trend-pullback|sustained-high|latency-scalp|deep-rebound|extreme-020-rebound|final-30-high|final-30-hedged|final-30-managed|dynamic-range-pullback|dynamic-range-final-managed|trend-range-switch|trend-range-regime|trend-range-overlay|adaptive-overlay|range-arb|market-maker|conditional-market-maker|hybrid> --csv <path>",
+        "  npm run backtest:btc5m -- --strategy <edge|managed-edge|adaptive-edge|conditional-rebound|trend-pullback|sustained-high|latency-scalp|deep-rebound|extreme-020-rebound|range-mid-reversion|final-30-high|final-30-hedged|final-30-managed|dynamic-range-pullback|dynamic-range-final-managed|trend-range-switch|trend-range-regime|trend-range-overlay|adaptive-overlay|range-arb|market-maker|conditional-market-maker|hybrid> --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:edge --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:range-arb --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:market-maker --csv <path>",
@@ -322,6 +370,8 @@ function usage(): string {
 function parseStrategy(value: string | undefined): BacktestStrategy {
     if (value === "edge" || value === "btc5m:edge") return "edge";
     if (value === "range-arb" || value === "btc5m:range-arb") return "range-arb";
+    if (value === "range-mid-reversion" || value === "btc5m:range-mid-reversion") return "range-mid-reversion";
+    if (value === "conditional-rebound" || value === "btc5m:conditional-rebound") return "conditional-rebound";
     if (value === "market-maker" || value === "btc5m:market-maker") return "market-maker";
     if (value === "conditional-market-maker" || value === "btc5m:conditional-market-maker") return "conditional-market-maker";
     if (value === "hybrid" || value === "btc5m:hybrid") return "hybrid";
@@ -369,12 +419,33 @@ function loadConfig(): BacktestConfig {
         maxPrice: Number(getArgValue("--max-price") ?? envNumber("BACKTEST_MAX_PRICE", 0.98)),
         rangePriceX: Number(getArgValue("--range-price-x") ?? envNumber("RANGE_ARB_PRICE_X", 0.4)),
         rangeUsdcPerLeg: Number(getArgValue("--range-usdc-per-leg") ?? envNumber("RANGE_ARB_USDC_PER_LEG", 5)),
+        rangeMidObserveSeconds: Number(getArgValue("--range-mid-observe-seconds") ?? envNumber("RANGE_MID_OBSERVE_SECONDS", 120)),
+        rangeMidProfitDelta: Number(getArgValue("--range-mid-profit-delta") ?? envNumber("RANGE_MID_PROFIT_DELTA", 0.05)),
+        rangeMidMaxHoldSeconds: Number(getArgValue("--range-mid-max-hold-seconds") ?? envNumber("RANGE_MID_MAX_HOLD_SECONDS", 15)),
+        rangeMidForceExitSecondsLeft: Number(getArgValue("--range-mid-force-exit-seconds") ?? envNumber("RANGE_MID_FORCE_EXIT_SECONDS", 30)),
+        rangeMidMinSecondsLeftToOpen: Number(getArgValue("--range-mid-min-seconds-left") ?? envNumber("RANGE_MID_MIN_SECONDS_LEFT_TO_OPEN", 60)),
+        rangeMidMinMidCrosses: Number(getArgValue("--range-mid-min-crosses") ?? envNumber("RANGE_MID_MIN_MID_CROSSES", 2)),
+        rangeMidShares: Number(getArgValue("--range-mid-shares") ?? envNumber("RANGE_MID_SHARES", 5)),
+        conditionalReboundTrainRatio: Number(getArgValue("--rebound-train-ratio") ?? envNumber("CONDITIONAL_REBOUND_TRAIN_RATIO", 0.67)),
+        conditionalReboundLookbackSeconds: Number(getArgValue("--rebound-lookback-seconds") ?? envNumber("CONDITIONAL_REBOUND_LOOKBACK_SECONDS", 60)),
+        conditionalReboundHorizonSeconds: Number(getArgValue("--rebound-horizon-seconds") ?? envNumber("CONDITIONAL_REBOUND_HORIZON_SECONDS", 30)),
+        conditionalReboundSampleIntervalSeconds: Number(getArgValue("--rebound-sample-interval-seconds") ?? envNumber("CONDITIONAL_REBOUND_SAMPLE_INTERVAL_SECONDS", 10)),
+        conditionalReboundTakeProfitDelta: Number(getArgValue("--rebound-take-profit-delta") ?? envNumber("CONDITIONAL_REBOUND_TAKE_PROFIT_DELTA", 0.05)),
+        conditionalReboundStopLossDelta: Number(getArgValue("--rebound-stop-loss-delta") ?? envNumber("CONDITIONAL_REBOUND_STOP_LOSS_DELTA", 0.05)),
+        conditionalReboundMinProbability: Number(getArgValue("--rebound-min-probability") ?? envNumber("CONDITIONAL_REBOUND_MIN_PROBABILITY", 0.60)),
+        conditionalReboundMinExpectedPnl: Number(getArgValue("--rebound-min-expected-pnl") ?? envNumber("CONDITIONAL_REBOUND_MIN_EXPECTED_PNL", 0.005)),
+        conditionalReboundShares: Number(getArgValue("--rebound-shares") ?? envNumber("CONDITIONAL_REBOUND_SHARES", 5)),
+        conditionalReboundMinSecondsLeft: Number(getArgValue("--rebound-min-seconds-left") ?? envNumber("CONDITIONAL_REBOUND_MIN_SECONDS_LEFT", 60)),
+        conditionalReboundMaxSecondsLeft: Number(getArgValue("--rebound-max-seconds-left") ?? envNumber("CONDITIONAL_REBOUND_MAX_SECONDS_LEFT", 240)),
+        conditionalReboundMinAsk: Number(getArgValue("--rebound-min-ask") ?? envNumber("CONDITIONAL_REBOUND_MIN_ASK", 0.10)),
+        conditionalReboundMaxAsk: Number(getArgValue("--rebound-max-ask") ?? envNumber("CONDITIONAL_REBOUND_MAX_ASK", 0.90)),
         marketMakerQuoteShares: Number(getArgValue("--mm-quote-shares") ?? envNumber("MM_QUOTE_SHARES", 5)),
         marketMakerQuoteSpread: Number(getArgValue("--mm-quote-spread") ?? envNumber("MM_QUOTE_SPREAD", 0.06)),
         marketMakerMinLockedEdge: Number(getArgValue("--mm-min-locked-edge") ?? envNumber("MM_MIN_LOCKED_EDGE", 0.02)),
         marketMakerInventorySkewPerShare: Number(getArgValue("--mm-inventory-skew-per-share") ?? envNumber("MM_INVENTORY_SKEW_PER_SHARE", 0.002)),
         marketMakerMaxUsdcPerLeg: Number(getArgValue("--mm-max-usdc-per-leg") ?? (strategy === "conditional-market-maker" ? envNumber("CONDITIONAL_MM_MAX_USDC_PER_LEG", 5) : envNumber("MM_MAX_USDC_PER_LEG", 0))),
         marketMakerMaxInventoryShares: Number(getArgValue("--mm-max-inventory-shares") ?? (strategy === "conditional-market-maker" ? envNumber("CONDITIONAL_MM_MAX_INVENTORY_SHARES", 10) : envNumber("MM_MAX_INVENTORY_SHARES", 30))),
+        marketMakerCancelSecondsBeforeEnd: Number(getArgValue("--mm-cancel-seconds-before-end") ?? envNumber("MM_CANCEL_SECONDS_BEFORE_END", 8)),
         conditionalMmLookbackSeconds: Number(getArgValue("--cmm-lookback") ?? envNumber("CONDITIONAL_MM_LOOKBACK_SECONDS", 15)),
         conditionalMmAccelerationLookbackSeconds: Number(getArgValue("--cmm-acceleration-lookback") ?? envNumber("CONDITIONAL_MM_ACCELERATION_LOOKBACK_SECONDS", 2)),
         conditionalMmMaxRangeBps: Number(getArgValue("--cmm-max-range-bps") ?? envNumber("CONDITIONAL_MM_MAX_RANGE_BPS", 15)),
@@ -391,6 +462,9 @@ function loadConfig(): BacktestConfig {
         conditionalMmMinOrderUsdc: Number(getArgValue("--cmm-min-order-usdc") ?? envNumber("CONDITIONAL_MM_MIN_ORDER_USDC", 1)),
         conditionalMmMinOrderShares: Number(getArgValue("--cmm-min-order-shares") ?? envNumber("CONDITIONAL_MM_MIN_ORDER_SHARES", 5)),
         conditionalMmMinSellProfit: Number(getArgValue("--cmm-min-sell-profit") ?? envNumber("CONDITIONAL_MM_MIN_SELL_PROFIT", 0.01)),
+        conditionalMmForceFlattenSecondsBeforeEnd: Number(getArgValue("--cmm-force-flatten-seconds") ?? envNumber("CONDITIONAL_MM_FORCE_FLATTEN_SECONDS_BEFORE_END", 15)),
+        conditionalMmMaxUnpairedSeconds: Number(getArgValue("--cmm-max-unpaired-seconds") ?? envNumber("CONDITIONAL_MM_MAX_UNPAIRED_SECONDS", 5)),
+        conditionalMmPairOrderMaxAgeSeconds: Number(getArgValue("--cmm-pair-order-max-age-seconds") ?? envNumber("CONDITIONAL_MM_PAIR_ORDER_MAX_AGE_SECONDS", 30)),
         // Hybrid params
         hybridLookbackSeconds: Number(getArgValue("--hybrid-lookback") ?? envNumber("HYBRID_LOOKBACK_SECONDS", 60)),
         hybridOscillationThreshold: Number(getArgValue("--hybrid-osc-threshold") ?? envNumber("HYBRID_OSC_THRESHOLD", 2)),
@@ -429,15 +503,27 @@ function loadConfig(): BacktestConfig {
         adaptiveLateTimePenalty: Number(getArgValue("--adaptive-late-time-penalty") ?? envNumber("ADAPTIVE_EDGE_LATE_TIME_PENALTY", 0.05)),
         adaptiveScalpProfitPrice: Number(getArgValue("--adaptive-scalp-profit-price") ?? envNumber("ADAPTIVE_EDGE_SCALP_PROFIT_PRICE", 0.10)),
         adaptiveScalpProfitPct: Number(getArgValue("--adaptive-scalp-profit-pct") ?? envNumber("ADAPTIVE_EDGE_SCALP_PROFIT_PCT", 0.25)),
-        trendPullbackTriggerPrice: Number(getArgValue("--trend-trigger-price") ?? envNumber("TREND_PULLBACK_TRIGGER_PRICE", 0.85)),
-        trendPullbackEntryPrice: Number(getArgValue("--trend-entry-price") ?? envNumber("TREND_PULLBACK_ENTRY_PRICE", 0.80)),
+        trendPullbackTriggerPrice: Number(getArgValue("--trend-trigger-price") ?? envNumber("TREND_PULLBACK_TRIGGER_PRICE", 0.90)),
+        trendPullbackEntryPrice: Number(getArgValue("--trend-entry-price") ?? envNumber("TREND_PULLBACK_ENTRY_PRICE", 0.85)),
         trendPullbackOrderUsdc: Number(getArgValue("--trend-order-usdc") ?? envNumber("TREND_PULLBACK_ORDER_USDC", 1.6)),
         trendPullbackMaxUsdcPerLeg: Number(getArgValue("--trend-max-usdc-per-leg") ?? envNumber("TREND_PULLBACK_MAX_USDC_PER_LEG", 1.6)),
-        trendPullbackMinSecondsLeftToTrigger: Number(getArgValue("--trend-min-seconds-left-to-trigger") ?? envNumber("TREND_PULLBACK_MIN_SECONDS_LEFT_TO_TRIGGER", 30)),
-        trendPullbackMinSecondsLeftToFill: Number(getArgValue("--trend-min-seconds-left-to-fill") ?? envNumber("TREND_PULLBACK_MIN_SECONDS_LEFT_TO_FILL", 0)),
-        trendPullbackTriggerConfirmSeconds: Number(getArgValue("--trend-trigger-confirm-seconds") ?? envNumber("TREND_PULLBACK_TRIGGER_CONFIRM_SECONDS", 0)),
-        trendPullbackMaxOrderAgeSeconds: Number(getArgValue("--trend-max-order-age-seconds") ?? envNumber("TREND_PULLBACK_MAX_ORDER_AGE_SECONDS", 8)),
-        trendPullbackMaxBtcReversalBps: Number(getArgValue("--trend-max-btc-reversal-bps") ?? envNumber("TREND_PULLBACK_MAX_BTC_REVERSAL_BPS", 2)),
+        trendPullbackMinSecondsLeftToTrigger: Number(getArgValue("--trend-min-seconds-left-to-trigger") ?? envNumber("TREND_PULLBACK_MIN_SECONDS_LEFT_TO_TRIGGER", 60)),
+        trendPullbackMaxSecondsLeftToTrigger: Number(getArgValue("--trend-max-seconds-left-to-trigger") ?? envNumber("TREND_PULLBACK_MAX_SECONDS_LEFT_TO_TRIGGER", 180)),
+        trendPullbackMinSecondsLeftToFill: Number(getArgValue("--trend-min-seconds-left-to-fill") ?? envNumber("TREND_PULLBACK_MIN_SECONDS_LEFT_TO_FILL", 20)),
+        trendPullbackTriggerConfirmSeconds: Number(getArgValue("--trend-trigger-confirm-seconds") ?? envNumber("TREND_PULLBACK_TRIGGER_CONFIRM_SECONDS", 2)),
+        trendPullbackMaxOrderAgeSeconds: Number(getArgValue("--trend-max-order-age-seconds") ?? envNumber("TREND_PULLBACK_MAX_ORDER_AGE_SECONDS", 30)),
+        trendPullbackMaxBtcReversalBps: Number(getArgValue("--trend-max-btc-reversal-bps") ?? envNumber("TREND_PULLBACK_MAX_BTC_REVERSAL_BPS", 3)),
+        trendPullbackBtcDirectionRequired: booleanValue(getArgValue("--trend-btc-direction-required") ?? process.env.TREND_PULLBACK_BTC_DIRECTION_REQUIRED, true),
+        trendPullbackTrendAtrLookbackSeconds: Number(getArgValue("--trend-atr-lookback") ?? envNumber("TREND_PULLBACK_TREND_ATR_LOOKBACK_SECONDS", 14)),
+        trendPullbackTrendAtrFloorUsd: Number(getArgValue("--trend-atr-floor-usd") ?? envNumber("TREND_PULLBACK_TREND_ATR_FLOOR_USD", 0.50)),
+        trendPullbackTrendMinGapSafety: Number(getArgValue("--trend-min-gap-safety") ?? envNumber("TREND_PULLBACK_TREND_MIN_GAP_SAFETY", 20)),
+        trendPullbackTrendMinPeakGapRatio: Number(getArgValue("--trend-min-peak-ratio") ?? envNumber("TREND_PULLBACK_TREND_MIN_PEAK_GAP_RATIO", 0.80)),
+        trendPullbackTrendMaxSpread: Number(getArgValue("--trend-max-spread") ?? envNumber("TREND_PULLBACK_TREND_MAX_SPREAD", 0.03)),
+        trendPullbackMinBtcRangeUsd: Number(getArgValue("--trend-min-btc-range-usd") ?? envNumber("TREND_PULLBACK_MIN_BTC_RANGE_USD", 0.50)),
+        trendPullbackMinBtcUniquePrices: Number(getArgValue("--trend-min-btc-unique-prices") ?? envNumber("TREND_PULLBACK_MIN_BTC_UNIQUE_PRICES", 3)),
+        trendPullbackMaxBtcUnchangedSeconds: Number(getArgValue("--trend-max-btc-unchanged-seconds") ?? envNumber("TREND_PULLBACK_MAX_BTC_UNCHANGED_SECONDS", 5)),
+        trendPullbackWaitForTouch: booleanValue(getArgValue("--trend-wait-for-touch") ?? process.env.TREND_PULLBACK_WAIT_FOR_TOUCH, true),
+        trendPullbackMaxTouchDrop: Number(getArgValue("--trend-max-touch-drop") ?? envNumber("TREND_PULLBACK_MAX_TOUCH_DROP", 0.05)),
         trendPullbackPostFillStopLossPrice: Number(getArgValue("--trend-post-fill-stop-loss-price") ?? envNumber("TREND_PULLBACK_POST_FILL_STOP_LOSS_PRICE", 0)),
         trendPullbackPostFillTakeProfitPrice: Number(getArgValue("--trend-post-fill-take-profit-price") ?? envNumber("TREND_PULLBACK_POST_FILL_TAKE_PROFIT_PRICE", 0)),
         trendPullbackPostFillMaxBtcReversalBps: Number(getArgValue("--trend-post-fill-max-btc-reversal-bps") ?? envNumber("TREND_PULLBACK_POST_FILL_MAX_BTC_REVERSAL_BPS", 0)),
@@ -512,7 +598,17 @@ function loadConfig(): BacktestConfig {
         final30HedgedMaxPairCost: Number(getArgValue("--final-30-hedged-max-pair-cost") ?? envNumber("FINAL_30_HEDGED_MAX_PAIR_COST", 0.95)),
         final30ManagedEarlyBtcMinMoveUsd: Number(getArgValue("--final-30-managed-early-btc-move-usd") ?? envNumber("FINAL_30_MANAGED_EARLY_BTC_MIN_MOVE_USD", 0)),
         final30ManagedEarlyBtcMinAsk: Number(getArgValue("--final-30-managed-early-btc-min-ask") ?? envNumber("FINAL_30_MANAGED_EARLY_BTC_MIN_ASK", 0.85)),
-        final30ManagedEarlyBtcMaxSecondsLeft: Number(getArgValue("--final-30-managed-early-btc-max-seconds-left") ?? envNumber("FINAL_30_MANAGED_EARLY_BTC_MAX_SECONDS_LEFT", 60)),
+        final30ManagedEarlyBtcMaxSecondsLeft: Number(getArgValue("--final-30-managed-early-btc-max-seconds-left") ?? envNumber("FINAL_30_MANAGED_EARLY_BTC_MAX_SECONDS_LEFT", 90)),
+        final30ManagedBtcDirectionRequired: booleanValue(getArgValue("--final-30-managed-btc-direction-required") ?? process.env.FINAL_30_MANAGED_BTC_DIRECTION_REQUIRED, true),
+        final30ManagedTrendAtrLookbackSeconds: Number(getArgValue("--final-30-managed-atr-lookback") ?? envNumber("FINAL_30_MANAGED_TREND_ATR_LOOKBACK_SECONDS", 14)),
+        final30ManagedTrendMinGapSafety: Number(getArgValue("--final-30-managed-min-gap-safety") ?? envNumber("FINAL_30_MANAGED_TREND_MIN_GAP_SAFETY", 0)),
+        final30ManagedTrendMinPeakGapRatio: Number(getArgValue("--final-30-managed-min-peak-ratio") ?? envNumber("FINAL_30_MANAGED_TREND_MIN_PEAK_GAP_RATIO", 0.80)),
+        final30ManagedTrendMaxSpread: Number(getArgValue("--final-30-managed-max-spread") ?? envNumber("FINAL_30_MANAGED_TREND_MAX_SPREAD", 0.03)),
+        final30ManagedTimezoneOffsetHours: Number(getArgValue("--final-30-managed-timezone-offset-hours") ?? envNumber("FINAL_30_MANAGED_TIMEZONE_OFFSET_HOURS", 8)),
+        final30ManagedDayStartHour: Number(getArgValue("--final-30-managed-day-start-hour") ?? envNumber("FINAL_30_MANAGED_DAY_START_HOUR", 9)),
+        final30ManagedDayEndHour: Number(getArgValue("--final-30-managed-day-end-hour") ?? envNumber("FINAL_30_MANAGED_DAY_END_HOUR", 21)),
+        final30ManagedDayMinDirectionalMarginBps: Number(getArgValue("--final-30-managed-day-min-btc-margin-bps") ?? envNumber("FINAL_30_MANAGED_DAY_MIN_BTC_MARGIN_BPS", 2)),
+        final30ManagedNightMinDirectionalMarginBps: Number(getArgValue("--final-30-managed-night-min-btc-margin-bps") ?? envNumber("FINAL_30_MANAGED_NIGHT_MIN_BTC_MARGIN_BPS", 1)),
         final30ManagedTakeProfitDelta: Number(getArgValue("--final-30-managed-take-profit-delta") ?? envNumber("FINAL_30_MANAGED_TAKE_PROFIT_DELTA", 0)),
         final30ManagedStopLossDelta: Number(getArgValue("--final-30-managed-stop-loss-delta") ?? envNumber("FINAL_30_MANAGED_STOP_LOSS_DELTA", 0.10)),
         final30ManagedStopMinBtcReversalBps: Number(getArgValue("--final-30-managed-stop-min-btc-reversal-bps") ?? envNumber("FINAL_30_MANAGED_STOP_MIN_BTC_REVERSAL_BPS", 2)),
@@ -557,6 +653,8 @@ function loadConfig(): BacktestConfig {
     if (!(cfg.maxPrice > 0 && cfg.maxPrice <= 1)) throw new Error("BACKTEST_MAX_PRICE must be > 0 and <= 1");
     if (!(cfg.rangePriceX > 0 && cfg.rangePriceX < 1)) throw new Error("RANGE_ARB_PRICE_X must be > 0 and < 1");
     if (cfg.rangeUsdcPerLeg <= 0) throw new Error("RANGE_ARB_USDC_PER_LEG must be > 0");
+    if (cfg.rangeMidObserveSeconds <= 0 || !(cfg.rangeMidProfitDelta > 0 && cfg.rangeMidProfitDelta < 1) || cfg.rangeMidMaxHoldSeconds <= 0 || cfg.rangeMidForceExitSecondsLeft < 0 || cfg.rangeMidMinSecondsLeftToOpen < cfg.rangeMidForceExitSecondsLeft || cfg.rangeMidMinMidCrosses < 0 || cfg.rangeMidShares <= 0) throw new Error("Invalid range-mid-reversion parameters");
+    if (!(cfg.conditionalReboundTrainRatio > 0 && cfg.conditionalReboundTrainRatio < 1) || cfg.conditionalReboundLookbackSeconds <= 0 || cfg.conditionalReboundHorizonSeconds <= 0 || cfg.conditionalReboundSampleIntervalSeconds <= 0 || cfg.conditionalReboundTakeProfitDelta <= 0 || cfg.conditionalReboundStopLossDelta <= 0 || !(cfg.conditionalReboundMinProbability > 0 && cfg.conditionalReboundMinProbability < 1) || cfg.conditionalReboundMinExpectedPnl < 0 || cfg.conditionalReboundShares <= 0 || cfg.conditionalReboundMinSecondsLeft < 0 || cfg.conditionalReboundMaxSecondsLeft <= cfg.conditionalReboundMinSecondsLeft || cfg.conditionalReboundMinAsk <= 0 || cfg.conditionalReboundMaxAsk >= 1 || cfg.conditionalReboundMaxAsk <= cfg.conditionalReboundMinAsk) throw new Error("Invalid conditional-rebound parameters");
     if (cfg.marketMakerQuoteShares <= 0) throw new Error("MM_QUOTE_SHARES must be > 0");
     if (!(cfg.marketMakerQuoteSpread > 0 && cfg.marketMakerQuoteSpread < 1)) throw new Error("MM_QUOTE_SPREAD must be > 0 and < 1");
     if (cfg.marketMakerMinLockedEdge < 0) throw new Error("MM_MIN_LOCKED_EDGE must be >= 0");
@@ -566,7 +664,7 @@ function loadConfig(): BacktestConfig {
     if (cfg.conditionalMmLookbackSeconds <= 0 || cfg.conditionalMmAccelerationLookbackSeconds <= 0 || cfg.conditionalMmAccelerationLookbackSeconds > cfg.conditionalMmLookbackSeconds) throw new Error("Invalid conditional market-maker lookback");
     if (cfg.conditionalMmMaxRangeBps <= 0 || cfg.conditionalMmMaxTrendBps <= 0 || cfg.conditionalMmMaxAccelerationBps <= 0 || cfg.conditionalMmTrendEfficiencyMinMomentumBps < 0 || cfg.conditionalMmDirectionMinMomentumBps < 0) throw new Error("Invalid conditional market-maker BTC thresholds");
     if (!(cfg.conditionalMmMaxTrendEfficiency > 0 && cfg.conditionalMmMaxTrendEfficiency <= 1)) throw new Error("CONDITIONAL_MM_MAX_TREND_EFFICIENCY must be between 0 and 1");
-    if (cfg.conditionalMmFavoredPriceImprove < 0 || cfg.conditionalMmUnfavoredPriceOffset < 0 || cfg.conditionalMmFavoredSizeMultiplier <= 0 || cfg.conditionalMmUnfavoredSizeMultiplier <= 0 || cfg.conditionalMmMaxNetInventoryShares <= 0 || cfg.conditionalMmMinOrderUsdc <= 0 || cfg.conditionalMmMinOrderUsdc > cfg.marketMakerMaxUsdcPerLeg || cfg.conditionalMmMinOrderShares <= 0 || cfg.conditionalMmMinSellProfit < 0) throw new Error("Invalid conditional market-maker skew, inventory, or order-size parameters");
+    if (cfg.conditionalMmFavoredPriceImprove < 0 || cfg.conditionalMmUnfavoredPriceOffset < 0 || cfg.conditionalMmFavoredSizeMultiplier <= 0 || cfg.conditionalMmUnfavoredSizeMultiplier <= 0 || cfg.conditionalMmMaxNetInventoryShares <= 0 || cfg.conditionalMmMinOrderUsdc <= 0 || (cfg.strategy === "conditional-market-maker" && cfg.conditionalMmMinOrderUsdc > cfg.marketMakerMaxUsdcPerLeg) || cfg.conditionalMmMinOrderShares <= 0 || cfg.conditionalMmMinSellProfit < 0 || cfg.marketMakerCancelSecondsBeforeEnd < 0 || cfg.conditionalMmForceFlattenSecondsBeforeEnd <= cfg.marketMakerCancelSecondsBeforeEnd || cfg.conditionalMmMaxUnpairedSeconds <= 0 || cfg.conditionalMmPairOrderMaxAgeSeconds <= 0) throw new Error("Invalid conditional market-maker skew, inventory, or order-size parameters");
     if (cfg.managedMinSecondsLeftToOpen < 0) throw new Error("MANAGED_EDGE_MIN_SECONDS_LEFT_TO_OPEN must be >= 0");
     if (cfg.managedMaxSecondsLeftToOpen < cfg.managedMinSecondsLeftToOpen) throw new Error("MANAGED_EDGE_MAX_SECONDS_LEFT_TO_OPEN must be >= MANAGED_EDGE_MIN_SECONDS_LEFT_TO_OPEN");
     if (cfg.managedNoCheapBuySecondsLeft < 0) throw new Error("MANAGED_EDGE_NO_CHEAP_BUY_SECONDS_LEFT must be >= 0");
@@ -587,10 +685,12 @@ function loadConfig(): BacktestConfig {
     if (cfg.trendPullbackOrderUsdc <= 0) throw new Error("TREND_PULLBACK_ORDER_USDC must be > 0");
     if (cfg.trendPullbackMaxUsdcPerLeg < 0) throw new Error("TREND_PULLBACK_MAX_USDC_PER_LEG must be >= 0");
     if (cfg.trendPullbackMinSecondsLeftToTrigger < 0) throw new Error("TREND_PULLBACK_MIN_SECONDS_LEFT_TO_TRIGGER must be >= 0");
+    if (cfg.trendPullbackMaxSecondsLeftToTrigger <= cfg.trendPullbackMinSecondsLeftToTrigger) throw new Error("TREND_PULLBACK_MAX_SECONDS_LEFT_TO_TRIGGER must exceed the minimum");
     if (cfg.trendPullbackMinSecondsLeftToFill < 0) throw new Error("TREND_PULLBACK_MIN_SECONDS_LEFT_TO_FILL must be >= 0");
     if (cfg.trendPullbackTriggerConfirmSeconds < 0) throw new Error("TREND_PULLBACK_TRIGGER_CONFIRM_SECONDS must be >= 0");
     if (cfg.trendPullbackMaxOrderAgeSeconds < 0) throw new Error("TREND_PULLBACK_MAX_ORDER_AGE_SECONDS must be >= 0");
     if (cfg.trendPullbackMaxBtcReversalBps < 0) throw new Error("TREND_PULLBACK_MAX_BTC_REVERSAL_BPS must be >= 0");
+    if (cfg.trendPullbackTrendAtrLookbackSeconds <= 0 || cfg.trendPullbackTrendAtrFloorUsd < 0 || cfg.trendPullbackTrendMinGapSafety < 0 || cfg.trendPullbackTrendMinPeakGapRatio < 0 || cfg.trendPullbackTrendMinPeakGapRatio > 1 || cfg.trendPullbackTrendMaxSpread < 0 || cfg.trendPullbackMinBtcRangeUsd < 0 || cfg.trendPullbackMinBtcUniquePrices < 0 || cfg.trendPullbackMaxBtcUnchangedSeconds < 0 || cfg.trendPullbackMaxTouchDrop < 0) throw new Error("Invalid trend-pullback trend quality parameters");
     if (!(cfg.trendPullbackPostFillStopLossPrice >= 0 && cfg.trendPullbackPostFillStopLossPrice < cfg.trendPullbackEntryPrice)) throw new Error("TREND_PULLBACK_POST_FILL_STOP_LOSS_PRICE must be >= 0 and below entry price");
     if (!(cfg.trendPullbackPostFillTakeProfitPrice >= 0 && cfg.trendPullbackPostFillTakeProfitPrice <= 1)) throw new Error("TREND_PULLBACK_POST_FILL_TAKE_PROFIT_PRICE must be between 0 and 1");
     if (cfg.trendPullbackPostFillMaxBtcReversalBps < 0) throw new Error("TREND_PULLBACK_POST_FILL_MAX_BTC_REVERSAL_BPS must be >= 0");
@@ -626,7 +726,7 @@ function loadConfig(): BacktestConfig {
     if (!(cfg.final30HighTriggerPrice > 0.5 && cfg.final30HighTriggerPrice < 1 && cfg.final30HighEarlyTriggerPrice >= cfg.final30HighTriggerPrice && cfg.final30HighEarlyTriggerPrice <= cfg.final30HighMaxEntryPrice && cfg.final30HighMaxEntryPrice < 1) || cfg.final30HighOrderShares <= 0) throw new Error("Invalid final-30-high price or size");
     if (cfg.final30HighMinSecondsLeftToOpen < 0 || cfg.final30HighMaxSecondsLeftToOpen <= cfg.final30HighMinSecondsLeftToOpen || cfg.final30HighEarlyMaxSecondsLeftToOpen < cfg.final30HighMaxSecondsLeftToOpen) throw new Error("Invalid final-30-high entry window");
     if (!(cfg.final30HedgedMaxPairCost > 0 && cfg.final30HedgedMaxPairCost < 1)) throw new Error("FINAL_30_HEDGED_MAX_PAIR_COST must be between 0 and 1");
-    if (cfg.final30ManagedEarlyBtcMinMoveUsd < 0 || cfg.final30ManagedEarlyBtcMinAsk <= 0.5 || cfg.final30ManagedEarlyBtcMinAsk > cfg.final30HighMaxEntryPrice || cfg.final30ManagedEarlyBtcMaxSecondsLeft <= cfg.final30HighMaxSecondsLeftToOpen) throw new Error("Invalid final-30-managed early BTC configuration");
+    if (cfg.final30ManagedEarlyBtcMinMoveUsd < 0 || cfg.final30ManagedEarlyBtcMinAsk <= 0.5 || cfg.final30ManagedEarlyBtcMinAsk > cfg.final30HighMaxEntryPrice || cfg.final30ManagedEarlyBtcMaxSecondsLeft <= cfg.final30HighMaxSecondsLeftToOpen || cfg.final30ManagedTrendAtrLookbackSeconds <= 0 || cfg.final30ManagedTrendMinGapSafety < 0 || cfg.final30ManagedTrendMinPeakGapRatio < 0 || cfg.final30ManagedTrendMinPeakGapRatio > 1 || cfg.final30ManagedTrendMaxSpread < 0 || !Number.isInteger(cfg.final30ManagedTimezoneOffsetHours) || cfg.final30ManagedTimezoneOffsetHours < -23 || cfg.final30ManagedTimezoneOffsetHours > 23 || !Number.isInteger(cfg.final30ManagedDayStartHour) || cfg.final30ManagedDayStartHour < 0 || cfg.final30ManagedDayStartHour > 23 || !Number.isInteger(cfg.final30ManagedDayEndHour) || cfg.final30ManagedDayEndHour < 0 || cfg.final30ManagedDayEndHour > 23 || cfg.final30ManagedDayStartHour === cfg.final30ManagedDayEndHour || cfg.final30ManagedDayMinDirectionalMarginBps < 0 || cfg.final30ManagedNightMinDirectionalMarginBps < 0) throw new Error("Invalid final-30-managed early BTC configuration");
     if (!(cfg.final30ManagedTakeProfitDelta >= 0 && cfg.final30ManagedTakeProfitDelta < 1) || !(cfg.final30ManagedStopLossDelta >= 0 && cfg.final30ManagedStopLossDelta < 1)) throw new Error("Invalid final-30-managed exit deltas");
     if (cfg.final30ManagedStopMinBtcReversalBps < 0 || cfg.final30ManagedStopConfirmSeconds < 0 || cfg.final30ManagedStopMaxDirectionalMarginBps < 0) throw new Error("Invalid final-30-managed BTC stop confirmation");
     const dynamic = cfg.dynamicRangePullbackParams;
@@ -1236,6 +1336,7 @@ function runFinal30HedgedBacktest(rows: MarketRow[], cfg: BacktestConfig): { cyc
 function runFinal30ManagedBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
     const cycles = createCycleMap(rows, cfg);
     const positions = new Map<string, Btc5mFinal30ManagedPosition>();
+    const historyByCycle = new Map<string, Btc5mRegimeSnapshot[]>();
     const blocked = new Set<string>();
     let takeProfits = 0;
     let stopLosses = 0;
@@ -1243,6 +1344,9 @@ function runFinal30ManagedBacktest(rows: MarketRow[], cfg: BacktestConfig): { cy
         const cycle = cycles.get(row.slug)!;
         updateWinner(cycle, row);
         if (row.rowType === "resolution") continue;
+        const history = historyByCycle.get(row.slug) ?? [];
+        history.push({ t: row.timestampMs, upAsk: row.upAsk, downAsk: row.downAsk, btcPrice: row.btcPrice });
+        historyByCycle.set(row.slug, history);
         const position = positions.get(row.slug);
         const decision = buildBtc5mFinal30ManagedOrders({
             timestampMs: row.timestampMs,
@@ -1253,6 +1357,7 @@ function runFinal30ManagedBacktest(rows: MarketRow[], cfg: BacktestConfig): { cy
             downBid: row.downBid,
             btcPrice: row.btcPrice,
             openPrice: cycle.openPrice,
+            history,
             position,
             blocked: blocked.has(row.slug),
             params: final30ManagedParams(cfg),
@@ -1294,6 +1399,16 @@ function final30ManagedParams(cfg: BacktestConfig) {
         earlyBtcMinMoveUsd: cfg.final30ManagedEarlyBtcMinMoveUsd,
         earlyBtcMinAsk: cfg.final30ManagedEarlyBtcMinAsk,
         earlyBtcMaxSecondsLeftToOpen: cfg.final30ManagedEarlyBtcMaxSecondsLeft,
+        btcDirectionRequired: cfg.final30ManagedBtcDirectionRequired,
+        trendAtrLookbackSeconds: cfg.final30ManagedTrendAtrLookbackSeconds,
+        trendMinGapSafety: cfg.final30ManagedTrendMinGapSafety,
+        trendMinPeakGapRatio: cfg.final30ManagedTrendMinPeakGapRatio,
+        trendMaxSpread: cfg.final30ManagedTrendMaxSpread,
+        timezoneOffsetHours: cfg.final30ManagedTimezoneOffsetHours,
+        dayStartHour: cfg.final30ManagedDayStartHour,
+        dayEndHour: cfg.final30ManagedDayEndHour,
+        dayMinDirectionalMarginBps: cfg.final30ManagedDayMinDirectionalMarginBps,
+        nightMinDirectionalMarginBps: cfg.final30ManagedNightMinDirectionalMarginBps,
         takeProfitDelta: cfg.final30ManagedTakeProfitDelta,
         stopLossDelta: cfg.final30ManagedStopLossDelta,
         stopMinBtcReversalBps: cfg.final30ManagedStopMinBtcReversalBps,
@@ -1576,6 +1691,9 @@ function runConditionalMarketMakerBacktest(rows: MarketRow[], cfg: BacktestConfi
     const cycles = createCycleMap(rows, cfg);
     const history = new Map<string, Btc5mConditionalMarketMakerSample[]>();
     const activeQuotes = new Map<string, Map<string, Btc5mStrategyQuote>>();
+    const attemptedCycles = new Set<string>();
+    const pairPlacedAt = new Map<string, number>();
+    const unpairedSince = new Map<string, number>();
     let quotedRows = 0;
     let filteredRows = 0;
     let buyFills = 0;
@@ -1604,6 +1722,11 @@ function runConditionalMarketMakerBacktest(rows: MarketRow[], cfg: BacktestConfi
                 }
             }
         }
+        if (Math.abs(cycle.inventoryUp - cycle.inventoryDown) >= cfg.conditionalMmMinOrderShares) {
+            if (!unpairedSince.has(row.slug)) unpairedSince.set(row.slug, row.timestampMs);
+        } else {
+            unpairedSince.delete(row.slug);
+        }
 
         const samples = history.get(row.slug) ?? [];
         if (row.btcPrice !== undefined) samples.push({ timestampMs: row.timestampMs, btcPrice: row.btcPrice });
@@ -1611,7 +1734,7 @@ function runConditionalMarketMakerBacktest(rows: MarketRow[], cfg: BacktestConfi
         while (samples.length && samples[0].timestampMs < cutoff) samples.shift();
         history.set(row.slug, samples);
 
-        if (secondsLeft < cfg.minSecondsLeft) {
+        if (secondsLeft <= cfg.marketMakerCancelSecondsBeforeEnd) {
             quotes.clear();
             activeQuotes.set(row.slug, quotes);
             continue;
@@ -1651,6 +1774,9 @@ function runConditionalMarketMakerBacktest(rows: MarketRow[], cfg: BacktestConfi
                 minOrderUsdc: cfg.conditionalMmMinOrderUsdc,
                 minOrderShares: cfg.conditionalMmMinOrderShares,
                 minSellProfit: cfg.conditionalMmMinSellProfit,
+                forceFlattenSecondsBeforeEnd: cfg.conditionalMmForceFlattenSecondsBeforeEnd,
+                maxUnpairedSeconds: cfg.conditionalMmMaxUnpairedSeconds,
+                pairOrderMaxAgeSeconds: cfg.conditionalMmPairOrderMaxAgeSeconds,
             },
             state: {
                 qUp: cycle.inventoryUp,
@@ -1659,15 +1785,28 @@ function runConditionalMarketMakerBacktest(rows: MarketRow[], cfg: BacktestConfi
                 buyCostDown: cycle.spentDown,
                 positionCostUp: cycle.costUp,
                 positionCostDown: cycle.costDown,
+                entryAttempted: attemptedCycles.has(row.slug)
+                    && !(quotes.size === 2 && Array.from(quotes.values()).every((quote) => quote.side === "BUY") && row.timestampMs - (pairPlacedAt.get(row.slug) ?? 0) < cfg.conditionalMmPairOrderMaxAgeSeconds * 1000),
+                unpairedSinceMs: unpairedSince.get(row.slug),
             },
         });
-        quotes.clear();
-        for (const quote of decision.quotes) quotes.set(quote.key, quote);
+        const keepExistingPair = quotes.size === 2
+            && Array.from(quotes.values()).every((quote) => quote.side === "BUY")
+            && decision.quotes.filter((quote) => quote.side === "BUY").length === 2
+            && row.timestampMs - (pairPlacedAt.get(row.slug) ?? 0) < cfg.conditionalMmPairOrderMaxAgeSeconds * 1000;
+        if (!keepExistingPair) {
+            quotes.clear();
+            for (const quote of decision.quotes) quotes.set(quote.key, quote);
+        }
+        if (!attemptedCycles.has(row.slug) && decision.quotes.filter((quote) => quote.side === "BUY").length === 2) {
+            attemptedCycles.add(row.slug);
+            pairPlacedAt.set(row.slug, row.timestampMs);
+        }
         if (decision.quotes.length) quotedRows++;
         else filteredRows++;
         activeQuotes.set(row.slug, quotes);
     }
-    settleCycles(cycles);
+    settleManagedCycles(cycles);
     const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
     console.log(`Conditional market maker: quotedRows=${quotedRows}, filteredRows=${filteredRows}, buyFills=${buyFills}, sellFills=${sellFills}`);
     return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
@@ -1676,6 +1815,7 @@ function runConditionalMarketMakerBacktest(rows: MarketRow[], cfg: BacktestConfi
 function runTrendPullbackBacktest(rows: MarketRow[], cfg: BacktestConfig, logStats = true): { cycles: CycleState[]; trades: Trade[] } {
     const cycles = createCycleMap(rows, cfg);
     const states = new Map<string, Btc5mTrendPullbackState>();
+    const historyByCycle = new Map<string, Btc5mRegimeSnapshot[]>();
     let triggeredCycles = 0;
     let filledCycles = 0;
     let cancelledCycles = 0;
@@ -1684,6 +1824,9 @@ function runTrendPullbackBacktest(rows: MarketRow[], cfg: BacktestConfig, logSta
         const cycle = cycles.get(row.slug)!;
         updateWinner(cycle, row);
         if (row.rowType === "resolution") continue;
+        const history = historyByCycle.get(row.slug) ?? [];
+        history.push({ t: row.timestampMs, upAsk: row.upAsk, downAsk: row.downAsk, btcPrice: row.btcPrice });
+        historyByCycle.set(row.slug, history);
 
         const previousState = states.get(row.slug) ?? {};
         const decision = buildBtc5mTrendPullbackOrders({
@@ -1694,6 +1837,8 @@ function runTrendPullbackBacktest(rows: MarketRow[], cfg: BacktestConfig, logSta
             upBid: row.upBid,
             downBid: row.downBid,
             btcPrice: row.btcPrice,
+            openPrice: cycle.openPrice,
+            history,
             spentUp: cycle.spentUp,
             spentDown: cycle.spentDown,
             state: previousState,
@@ -1703,10 +1848,22 @@ function runTrendPullbackBacktest(rows: MarketRow[], cfg: BacktestConfig, logSta
                 orderUsdc: cfg.trendPullbackOrderUsdc,
                 maxUsdcPerLeg: cfg.trendPullbackMaxUsdcPerLeg,
                 minSecondsLeftToTrigger: cfg.trendPullbackMinSecondsLeftToTrigger,
+                maxSecondsLeftToTrigger: cfg.trendPullbackMaxSecondsLeftToTrigger,
                 minSecondsLeftToFill: cfg.trendPullbackMinSecondsLeftToFill,
                 triggerConfirmSeconds: cfg.trendPullbackTriggerConfirmSeconds,
                 maxOrderAgeSeconds: cfg.trendPullbackMaxOrderAgeSeconds,
                 maxBtcReversalBps: cfg.trendPullbackMaxBtcReversalBps,
+                btcDirectionRequired: cfg.trendPullbackBtcDirectionRequired,
+                trendAtrLookbackSeconds: cfg.trendPullbackTrendAtrLookbackSeconds,
+                trendAtrFloorUsd: cfg.trendPullbackTrendAtrFloorUsd,
+                trendMinGapSafety: cfg.trendPullbackTrendMinGapSafety,
+                trendMinPeakGapRatio: cfg.trendPullbackTrendMinPeakGapRatio,
+                trendMaxSpread: cfg.trendPullbackTrendMaxSpread,
+                minBtcRangeUsd: cfg.trendPullbackMinBtcRangeUsd,
+                minBtcUniquePrices: cfg.trendPullbackMinBtcUniquePrices,
+                maxBtcUnchangedSeconds: cfg.trendPullbackMaxBtcUnchangedSeconds,
+                waitForPullbackTouch: cfg.trendPullbackWaitForTouch,
+                maxTouchDrop: cfg.trendPullbackMaxTouchDrop,
                 postFillStopLossPrice: cfg.trendPullbackPostFillStopLossPrice,
                 postFillTakeProfitPrice: cfg.trendPullbackPostFillTakeProfitPrice,
                 postFillMaxBtcReversalBps: cfg.trendPullbackPostFillMaxBtcReversalBps,
@@ -2308,7 +2465,7 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
     console.log(`Strategy: ${cfg.strategy}`);
     console.log(`CSV: ${cfg.csvPath}`);
     console.log(`Cycles: ${cycles.length}, traded cycles: ${tradedCycles}`);
-    if (cfg.strategy === "conditional-market-maker" || cfg.strategy === "trend-pullback" || cfg.strategy === "sustained-high" || cfg.strategy === "latency-scalp" || cfg.strategy === "deep-rebound" || cfg.strategy === "extreme-020-rebound" || cfg.strategy === "final-30-high" || cfg.strategy === "final-30-hedged" || cfg.strategy === "final-30-managed" || cfg.strategy === "dynamic-range-pullback" || cfg.strategy === "dynamic-range-final-managed" || cfg.strategy === "trend-range-switch" || cfg.strategy === "trend-range-regime" || cfg.strategy === "trend-range-overlay" || cfg.strategy === "adaptive-overlay") {
+    if (cfg.strategy === "conditional-market-maker" || cfg.strategy === "range-mid-reversion" || cfg.strategy === "conditional-rebound" || cfg.strategy === "trend-pullback" || cfg.strategy === "sustained-high" || cfg.strategy === "latency-scalp" || cfg.strategy === "deep-rebound" || cfg.strategy === "extreme-020-rebound" || cfg.strategy === "final-30-high" || cfg.strategy === "final-30-hedged" || cfg.strategy === "final-30-managed" || cfg.strategy === "dynamic-range-pullback" || cfg.strategy === "dynamic-range-final-managed" || cfg.strategy === "trend-range-switch" || cfg.strategy === "trend-range-regime" || cfg.strategy === "trend-range-overlay" || cfg.strategy === "adaptive-overlay") {
         const entries = trades.filter((trade) => trade.cost > 0);
         const profitableCycles = cycles.filter((cycle) => {
             const cost = cycle.trades.reduce((sum, trade) => sum + trade.cost, 0);
@@ -2338,8 +2495,12 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
     console.log(`Risk: maxDrawdown=${maxDrawdown.toFixed(4)} USDC, maxConsecutiveLosingCycles=${maxLosingStreak}`);
     if (cfg.strategy === "conditional-market-maker") {
         console.log(`Params: lookback=${cfg.conditionalMmLookbackSeconds}s, acceleration=${cfg.conditionalMmAccelerationLookbackSeconds}s/${cfg.conditionalMmMaxAccelerationBps}bps, maxRange=${cfg.conditionalMmMaxRangeBps}bps, maxTrend=${cfg.conditionalMmMaxTrendBps}bps, maxEfficiency=${cfg.conditionalMmMaxTrendEfficiency}@${cfg.conditionalMmTrendEfficiencyMinMomentumBps}bps, directionMin=${cfg.conditionalMmDirectionMinMomentumBps}bps, skew=+${cfg.conditionalMmFavoredPriceImprove}/-${cfg.conditionalMmUnfavoredPriceOffset}, size=${cfg.conditionalMmFavoredSizeMultiplier}/${cfg.conditionalMmUnfavoredSizeMultiplier}, maxNet=${cfg.conditionalMmMaxNetInventoryShares}, orderUsdc=${cfg.conditionalMmMinOrderUsdc}-${cfg.marketMakerMaxUsdcPerLeg}/leg`);
+    } else if (cfg.strategy === "range-mid-reversion") {
+        console.log(`Params: observe=${cfg.rangeMidObserveSeconds}s, profitDelta=${cfg.rangeMidProfitDelta}, maxHold=${cfg.rangeMidMaxHoldSeconds}s, forceExit=${cfg.rangeMidForceExitSecondsLeft}s, minSecondsLeft=${cfg.rangeMidMinSecondsLeftToOpen}s, minCrosses=${cfg.rangeMidMinMidCrosses}, shares=${cfg.rangeMidShares}`);
+    } else if (cfg.strategy === "conditional-rebound") {
+        console.log(`Params: trainRatio=${cfg.conditionalReboundTrainRatio}, lookback=${cfg.conditionalReboundLookbackSeconds}s, horizon=${cfg.conditionalReboundHorizonSeconds}s, tp=${cfg.conditionalReboundTakeProfitDelta}, sl=${cfg.conditionalReboundStopLossDelta}, minP=${cfg.conditionalReboundMinProbability}, minEV=${cfg.conditionalReboundMinExpectedPnl}, shares=${cfg.conditionalReboundShares}, secondsLeft=${cfg.conditionalReboundMinSecondsLeft}-${cfg.conditionalReboundMaxSecondsLeft}`);
     } else if (cfg.strategy === "trend-pullback") {
-        console.log(`Params: trigger=${cfg.trendPullbackTriggerPrice}, entry=${cfg.trendPullbackEntryPrice}, orderUsdc=${cfg.trendPullbackOrderUsdc}, minSecondsLeftToFill=${cfg.trendPullbackMinSecondsLeftToFill}, confirmSeconds=${cfg.trendPullbackTriggerConfirmSeconds}, maxOrderAgeSeconds=${cfg.trendPullbackMaxOrderAgeSeconds}, maxBtcReversalBps=${cfg.trendPullbackMaxBtcReversalBps}`);
+        console.log(`Params: trigger=${cfg.trendPullbackTriggerPrice}, entry=${cfg.trendPullbackEntryPrice}, orderUsdc=${cfg.trendPullbackOrderUsdc}, window=${cfg.trendPullbackMinSecondsLeftToTrigger}-${cfg.trendPullbackMaxSecondsLeftToTrigger}s, minSecondsLeftToFill=${cfg.trendPullbackMinSecondsLeftToFill}, confirmSeconds=${cfg.trendPullbackTriggerConfirmSeconds}, maxOrderAgeSeconds=${cfg.trendPullbackMaxOrderAgeSeconds}, maxBtcReversalBps=${cfg.trendPullbackMaxBtcReversalBps}, direction=${cfg.trendPullbackBtcDirectionRequired}, gapSafety>=${cfg.trendPullbackTrendMinGapSafety}, peakRatio>=${cfg.trendPullbackTrendMinPeakGapRatio}, spread<=${cfg.trendPullbackTrendMaxSpread}, btcRange>=${cfg.trendPullbackMinBtcRangeUsd}, unique>=${cfg.trendPullbackMinBtcUniquePrices}, unchanged<=${cfg.trendPullbackMaxBtcUnchangedSeconds}s, waitForTouch=${cfg.trendPullbackWaitForTouch}, maxTouchDrop=${cfg.trendPullbackMaxTouchDrop}`);
     } else if (cfg.strategy === "sustained-high") {
         console.log(`Params: trigger=${cfg.sustainedHighTriggerPrice}, confirmSeconds=${cfg.sustainedHighConfirmSeconds}, entry=${cfg.sustainedHighEntryPrice}, orderUsdc=${cfg.sustainedHighOrderUsdc}, maxSecondsLeftToTrigger=${cfg.sustainedHighMaxSecondsLeftToTrigger}, minSecondsLeftToTrigger=${cfg.sustainedHighMinSecondsLeftToTrigger}, minSecondsLeftToFill=${cfg.sustainedHighMinSecondsLeftToFill}, maxOrderAgeSeconds=${cfg.sustainedHighMaxOrderAgeSeconds}, minBtcMoveBps=${cfg.sustainedHighMinBtcMoveBps}, maxBtcReversalBps=${cfg.sustainedHighMaxBtcReversalBps}`);
     } else if (cfg.strategy === "latency-scalp") {
@@ -2353,7 +2514,7 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
     } else if (cfg.strategy === "final-30-hedged") {
         console.log(`Params: ask>=${cfg.final30HighTriggerPrice} in final ${cfg.final30HighMaxSecondsLeftToOpen}s, maxEntry=${cfg.final30HighMaxEntryPrice}, shares=${cfg.final30HighOrderShares}, maxPairCost=${cfg.final30HedgedMaxPairCost}`);
     } else if (cfg.strategy === "final-30-managed") {
-        console.log(`Params: ask>=${cfg.final30HighTriggerPrice} in final ${cfg.final30HighMaxSecondsLeftToOpen}s, earlyBtcMove=$${cfg.final30ManagedEarlyBtcMinMoveUsd}/ask>=${cfg.final30ManagedEarlyBtcMinAsk}/until=${cfg.final30ManagedEarlyBtcMaxSecondsLeft}s, maxEntry=${cfg.final30HighMaxEntryPrice}, shares=${cfg.final30HighOrderShares}, takeProfitDelta=${cfg.final30ManagedTakeProfitDelta}, stopLossDelta=${cfg.final30ManagedStopLossDelta}, stopBtcReversal=${cfg.final30ManagedStopMinBtcReversalBps}bps, stopConfirm=${cfg.final30ManagedStopConfirmSeconds}s, stopMaxMargin=${cfg.final30ManagedStopMaxDirectionalMarginBps}bps`);
+        console.log(`Params: ask>=${cfg.final30HighTriggerPrice} in final ${cfg.final30HighMaxSecondsLeftToOpen}s, earlyBtcMove=$${cfg.final30ManagedEarlyBtcMinMoveUsd}/ask>=${cfg.final30ManagedEarlyBtcMinAsk}/until=${cfg.final30ManagedEarlyBtcMaxSecondsLeft}s, direction=${cfg.final30ManagedBtcDirectionRequired}, BTC margin day=${cfg.final30ManagedDayMinDirectionalMarginBps}bps/night=${cfg.final30ManagedNightMinDirectionalMarginBps}bps (${cfg.final30ManagedDayStartHour}:00-${cfg.final30ManagedDayEndHour}:00 UTC${cfg.final30ManagedTimezoneOffsetHours >= 0 ? "+" : ""}${cfg.final30ManagedTimezoneOffsetHours}), gapSafety>=${cfg.final30ManagedTrendMinGapSafety}, peakRatio>=${cfg.final30ManagedTrendMinPeakGapRatio}, spread<=${cfg.final30ManagedTrendMaxSpread}, maxEntry=${cfg.final30HighMaxEntryPrice}, shares=${cfg.final30HighOrderShares}, takeProfitDelta=${cfg.final30ManagedTakeProfitDelta}, stopLossDelta=${cfg.final30ManagedStopLossDelta}, stopBtcReversal=${cfg.final30ManagedStopMinBtcReversalBps}bps, stopConfirm=${cfg.final30ManagedStopConfirmSeconds}s, stopMaxMargin=${cfg.final30ManagedStopMaxDirectionalMarginBps}bps`);
     } else if (cfg.strategy === "dynamic-range-pullback") {
         const params = cfg.dynamicRangePullbackParams;
         console.log(`Params: contractPullback>=${params.minContractPullback}, entry=currentAsk, syntheticSell=${params.syntheticSell}, dynamicSizing=${params.dynamicSizing}, minShares=${params.orderShares}, pairCap=${params.maxPairUsdc}, lockedProfit>=${params.minLockedProfit}, secondsLeft=${params.minSecondsLeftToOpen}-${params.maxSecondsLeftToOpen}, confirm=${params.entryConfirmSeconds}s, btcMargin>=${params.minDirectionalBtcMarginBps}bps, btcRetracement<=${params.maxBtcRetracementBps}bps, pairCosts=${params.earlyPairCost}/${params.middlePairCost}/${params.latePairCost}, stopDelta=${params.stopLossDelta}, maxNaked=${params.maxNakedSeconds}s`);
@@ -2460,6 +2621,248 @@ function runHybridBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: Cy
     return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
 }
 
+function runRangeMidReversionBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    type State = {
+        attempted: boolean;
+        position: Btc5mRangeMidPosition;
+        activeEntry?: Btc5mStrategyQuote;
+    };
+    const cycles = createCycleMap(rows, cfg);
+    const histories = new Map<string, Btc5mRangeMidSample[]>();
+    const states = new Map<string, State>();
+    let placed = 0;
+    let entries = 0;
+    let takeProfits = 0;
+    let timeStops = 0;
+    let forceExits = 0;
+
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+        const history = histories.get(row.slug) ?? [];
+        const upMid = row.upMid ?? (row.upBid !== undefined ? (row.upBid + row.upAsk) / 2 : undefined);
+        if (upMid !== undefined && upMid > 0 && upMid < 1) history.push({ timestampMs: row.timestampMs, upMid });
+        histories.set(row.slug, history);
+
+        const state = states.get(row.slug) ?? { attempted: false, position: { shares: 0, cost: 0 } };
+        const secondsLeft = (cycle.endMs - row.timestampMs) / 1000;
+        if (state.activeEntry) {
+            const ask = state.activeEntry.leg === "UP" ? row.upAsk : row.downAsk;
+            if (ask <= state.activeEntry.price) {
+                const cost = state.activeEntry.price * state.activeEntry.size;
+                buyAtPrice(cycle, row, state.activeEntry.leg, state.activeEntry.price, cost, undefined, undefined, state.activeEntry.note);
+                state.position = { leg: state.activeEntry.leg, shares: state.activeEntry.size, cost, enteredAtMs: row.timestampMs };
+                state.activeEntry = undefined;
+                entries++;
+            } else if (secondsLeft < cfg.rangeMidMinSecondsLeftToOpen) {
+                state.activeEntry = undefined;
+            }
+        }
+
+        const decision = buildBtc5mRangeMidReversionOrders({
+            timestampMs: row.timestampMs,
+            startMs: cycle.startMs,
+            endMs: cycle.endMs,
+            upAsk: row.upAsk,
+            downAsk: row.downAsk,
+            upBid: row.upBid,
+            downBid: row.downBid,
+            history,
+            attempted: state.attempted,
+            position: state.position,
+            params: {
+                observeSeconds: cfg.rangeMidObserveSeconds,
+                profitDelta: cfg.rangeMidProfitDelta,
+                maxHoldSeconds: cfg.rangeMidMaxHoldSeconds,
+                forceExitSecondsLeft: cfg.rangeMidForceExitSecondsLeft,
+                minSecondsLeftToOpen: cfg.rangeMidMinSecondsLeftToOpen,
+                minMidCrosses: cfg.rangeMidMinMidCrosses,
+                shares: cfg.rangeMidShares,
+                tick: 0.01,
+            },
+        });
+
+        const sell = decision.quotes.find((quote) => quote.side === "SELL");
+        if (sell && state.position.shares > 0) {
+            const bid = sell.leg === "UP" ? row.upBid : row.downBid;
+            if (bid !== undefined && bid >= sell.price) {
+                sellAtPrice(cycle, row, sell.leg, sell.price, sell.size, sell.fair, sell.edge, sell.note);
+                state.position = { shares: 0, cost: 0 };
+                if (sell.note?.includes("take-profit")) takeProfits++;
+                else if (sell.note?.includes("time-stop")) timeStops++;
+                else forceExits++;
+            }
+        }
+
+        if (!state.attempted && !state.activeEntry && state.position.shares <= 0) {
+            const entry = decision.quotes.find((quote) => quote.side === "BUY");
+            if (entry) {
+                state.attempted = true;
+                state.activeEntry = entry;
+                placed++;
+            }
+        }
+        states.set(row.slug, state);
+    }
+
+    settleManagedCycles(cycles);
+    const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
+    console.log(`Range-mid reversion: placed=${placed}, entries=${entries}, takeProfits=${takeProfits}, timeStops=${timeStops}, forceExits=${forceExits}`);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
+function runConditionalReboundBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    type Position = { leg: Leg; shares: number; cost: number; entryPrice: number; enteredAtMs: number };
+    type State = { attempted: boolean; position?: Position; lastSignalAtMs?: number };
+    const cycles = createCycleMap(rows, cfg);
+    const rowsByCycle = new Map<string, MarketRow[]>();
+    for (const row of rows) {
+        const list = rowsByCycle.get(row.slug) ?? [];
+        if (row.rowType !== "resolution") list.push(row);
+        rowsByCycle.set(row.slug, list);
+        updateWinner(cycles.get(row.slug)!, row);
+    }
+    const cycleLists = Array.from(rowsByCycle.values()).filter((list) => list.length > 0).sort((left, right) => left[0].timestampMs - right[0].timestampMs);
+    const splitIndex = Math.max(1, Math.min(cycleLists.length - 1, Math.floor(cycleLists.length * cfg.conditionalReboundTrainRatio)));
+    const trainingCycles = cycleLists.slice(0, splitIndex);
+    const testingCycles = cycleLists.slice(splitIndex);
+    const trainingSamples: Btc5mConditionalReboundTrainingSample[] = [];
+
+    for (const cycleRows of trainingCycles) {
+        let lastSampleAt = 0;
+        for (let index = 0; index < cycleRows.length; index++) {
+            const row = cycleRows[index];
+            if (row.timestampMs - lastSampleAt < cfg.conditionalReboundSampleIntervalSeconds * 1000) continue;
+            lastSampleAt = row.timestampMs;
+            for (const leg of ["UP", "DOWN"] as const) {
+                const features = conditionalReboundFeatures(cycleRows, index, leg, cfg);
+                if (!features) continue;
+                trainingSamples.push({ features, label: conditionalReboundLabel(cycleRows, index, leg, cfg) });
+            }
+        }
+    }
+    const model = trainBtc5mConditionalReboundModel(trainingSamples);
+    const states = new Map<string, State>();
+    let entries = 0;
+    let takeProfits = 0;
+    let stopLosses = 0;
+    let timeStops = 0;
+    let predictedProbabilitySum = 0;
+
+    for (const cycleRows of testingCycles) {
+        const cycle = cycles.get(cycleRows[0].slug)!;
+        const state: State = { attempted: false };
+        for (let index = 0; index < cycleRows.length; index++) {
+            const row = cycleRows[index];
+            const secondsLeft = (cycle.endMs - row.timestampMs) / 1000;
+            if (state.position) {
+                const bid = state.position.leg === "UP" ? row.upBid : row.downBid;
+                if (bid !== undefined && bid > 0) {
+                    const target = Math.min(0.99, state.position.entryPrice + cfg.conditionalReboundTakeProfitDelta);
+                    const stop = Math.max(0.01, state.position.entryPrice - cfg.conditionalReboundStopLossDelta);
+                    const heldSeconds = (row.timestampMs - state.position.enteredAtMs) / 1000;
+                    const hitTarget = bid >= target;
+                    const hitStop = bid <= stop;
+                    const timedOut = heldSeconds >= cfg.conditionalReboundHorizonSeconds || secondsLeft <= 30;
+                    if (hitTarget || hitStop || timedOut) {
+                        const exitPrice = hitTarget ? target : bid;
+                        const note = hitTarget ? "conditional-rebound take-profit" : hitStop ? "conditional-rebound stop-loss" : "conditional-rebound time-stop";
+                        sellAtPrice(cycle, row, state.position.leg, exitPrice, state.position.shares, undefined, undefined, note);
+                        if (hitTarget) takeProfits++;
+                        else if (hitStop) stopLosses++;
+                        else timeStops++;
+                        state.position = undefined;
+                    }
+                }
+                continue;
+            }
+            if (state.attempted || secondsLeft < cfg.conditionalReboundMinSecondsLeft || secondsLeft > cfg.conditionalReboundMaxSecondsLeft) continue;
+            if (state.lastSignalAtMs !== undefined && row.timestampMs - state.lastSignalAtMs < cfg.conditionalReboundSampleIntervalSeconds * 1000) continue;
+            state.lastSignalAtMs = row.timestampMs;
+            const candidates = (["UP", "DOWN"] as const).flatMap((leg) => {
+                const features = conditionalReboundFeatures(cycleRows, index, leg, cfg);
+                if (!features) return [];
+                const probability = predictBtc5mConditionalRebound(model, features);
+                const expectedPnl = probability * cfg.conditionalReboundTakeProfitDelta - (1 - probability) * cfg.conditionalReboundStopLossDelta;
+                return [{ leg, features, probability, expectedPnl }];
+            }).sort((left, right) => right.expectedPnl - left.expectedPnl);
+            const selected = candidates[0];
+            if (!selected || selected.probability < cfg.conditionalReboundMinProbability || selected.expectedPnl < cfg.conditionalReboundMinExpectedPnl) continue;
+            const ask = selected.leg === "UP" ? row.upAsk : row.downAsk;
+            const cost = ask * cfg.conditionalReboundShares;
+            buyAtPrice(cycle, row, selected.leg, ask, cost, selected.leg === "UP" ? fairUpFromRow(row, cycle, cfg) : 1 - fairUpFromRow(row, cycle, cfg), selected.features.fairEdge, `conditional-rebound p=${selected.probability.toFixed(3)} ev=${selected.expectedPnl.toFixed(4)} pct=${selected.features.askPercentile.toFixed(2)}`);
+            state.attempted = true;
+            state.position = { leg: selected.leg, shares: cfg.conditionalReboundShares, cost, entryPrice: ask, enteredAtMs: row.timestampMs };
+            entries++;
+            predictedProbabilitySum += selected.probability;
+        }
+        states.set(cycle.slug, state);
+    }
+
+    settleManagedCycles(cycles);
+    const positives = trainingSamples.filter((sample) => sample.label === 1).length;
+    console.log(`Conditional rebound: trainCycles=${trainingCycles.length}, testCycles=${testingCycles.length}, trainSamples=${trainingSamples.length}, trainPositiveRate=${(positives / trainingSamples.length * 100).toFixed(2)}%, entries=${entries}, avgPredictedP=${entries ? (predictedProbabilitySum / entries).toFixed(3) : "0.000"}, takeProfits=${takeProfits}, stopLosses=${stopLosses}, timeStops=${timeStops}`);
+    const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
+function conditionalReboundFeatures(cycleRows: MarketRow[], index: number, leg: Leg, cfg: BacktestConfig): Btc5mConditionalReboundFeatures | undefined {
+    const row = cycleRows[index];
+    const cycleStartMs = Math.floor(row.timestampMs / (cfg.intervalMinutes * 60_000)) * cfg.intervalMinutes * 60_000;
+    const cycleEndMs = cycleStartMs + cfg.intervalMinutes * 60_000;
+    const secondsLeft = (cycleEndMs - row.timestampMs) / 1000;
+    const ask = leg === "UP" ? row.upAsk : row.downAsk;
+    const bid = leg === "UP" ? row.upBid : row.downBid;
+    if (ask < cfg.conditionalReboundMinAsk || ask > cfg.conditionalReboundMaxAsk || bid === undefined || row.btcPrice === undefined || row.openPrice === undefined || secondsLeft < cfg.conditionalReboundMinSecondsLeft || secondsLeft > cfg.conditionalReboundMaxSecondsLeft) return undefined;
+    const cutoff = row.timestampMs - cfg.conditionalReboundLookbackSeconds * 1000;
+    const history = cycleRows.slice(0, index + 1).filter((sample) => sample.timestampMs >= cutoff);
+    if (history.length < 10) return undefined;
+    const momentumRow = [...history].reverse().find((sample) => sample.timestampMs <= row.timestampMs - 15_000);
+    if (!momentumRow || momentumRow.btcPrice === undefined) return undefined;
+    const askValues = history.map((sample) => leg === "UP" ? sample.upAsk : sample.downAsk).filter((value) => value > 0 && value < 1);
+    const currentMid = leg === "UP" ? row.upMid ?? (bid + ask) / 2 : row.downMid ?? (bid + ask) / 2;
+    const pastBid = leg === "UP" ? momentumRow.upBid : momentumRow.downBid;
+    const pastAsk = leg === "UP" ? momentumRow.upAsk : momentumRow.downAsk;
+    if (pastBid === undefined) return undefined;
+    const pastMid = leg === "UP" ? momentumRow.upMid ?? (pastBid + pastAsk) / 2 : momentumRow.downMid ?? (pastBid + pastAsk) / 2;
+    const fairUp = fairUpProbability(row.btcPrice, row.openPrice, cycleEndMs - row.timestampMs, { intervalMinutes: cfg.intervalMinutes, volPerInterval: cfg.volPerInterval });
+    const fair = leg === "UP" ? fairUp : 1 - fairUp;
+    const askSum = row.upAsk + row.downAsk;
+    const marketProbability = askSum > 0 ? ask / askSum : ask;
+    const btcMomentumBps = (row.btcPrice / momentumRow.btcPrice - 1) * 10_000 * (leg === "UP" ? 1 : -1);
+    return {
+        ask,
+        askPercentile: askValues.filter((value) => value <= ask).length / askValues.length,
+        fairEdge: fair - marketProbability,
+        contractMomentum: currentMid - pastMid,
+        btcMomentumAlignedBps: btcMomentumBps,
+        secondsLeftRatio: secondsLeft / (cfg.intervalMinutes * 60),
+        spread: Math.max(0, ask - bid),
+        recentRange: Math.max(...askValues) - Math.min(...askValues),
+    };
+}
+
+function conditionalReboundLabel(cycleRows: MarketRow[], index: number, leg: Leg, cfg: BacktestConfig): 0 | 1 {
+    const row = cycleRows[index];
+    const entry = leg === "UP" ? row.upAsk : row.downAsk;
+    const target = Math.min(0.99, entry + cfg.conditionalReboundTakeProfitDelta);
+    const stop = Math.max(0.01, entry - cfg.conditionalReboundStopLossDelta);
+    const horizonMs = row.timestampMs + cfg.conditionalReboundHorizonSeconds * 1000;
+    for (let futureIndex = index + 1; futureIndex < cycleRows.length && cycleRows[futureIndex].timestampMs <= horizonMs; futureIndex++) {
+        const bid = leg === "UP" ? cycleRows[futureIndex].upBid : cycleRows[futureIndex].downBid;
+        if (bid === undefined) continue;
+        if (bid >= target) return 1;
+        if (bid <= stop) return 0;
+    }
+    return 0;
+}
+
+function fairUpFromRow(row: MarketRow, cycle: CycleState, cfg: BacktestConfig): number {
+    if (row.btcPrice === undefined || cycle.openPrice === undefined) return 0.5;
+    return fairUpProbability(row.btcPrice, cycle.openPrice, cycle.endMs - row.timestampMs, { intervalMinutes: cfg.intervalMinutes, volPerInterval: cfg.volPerInterval });
+}
+
 function runStrategy(cfg: BacktestConfig, records: Record<string, string>[]): { cycles: CycleState[]; trades: Trade[] } {
     const rows = toMarketRows(records, cfg.intervalMinutes);
     switch (cfg.strategy) {
@@ -2468,6 +2871,10 @@ function runStrategy(cfg: BacktestConfig, records: Record<string, string>[]): { 
         }
         case "range-arb":
             return runRangeArbBacktest(rows, cfg);
+        case "range-mid-reversion":
+            return runRangeMidReversionBacktest(rows, cfg);
+        case "conditional-rebound":
+            return runConditionalReboundBacktest(rows, cfg);
         case "market-maker":
             return runMarketMakerBacktest(rows, cfg);
         case "conditional-market-maker":

@@ -25,6 +25,8 @@
     "test:order-reconciliation": "tsx --test src/utils/clob-order-reconciliation.test.ts",
     "test:final-30-managed": "tsx --test src/strategies/btc5m/final-30-managed.test.ts",
     "test:conditional-market-maker": "tsx --test src/strategies/btc5m/conditional-market-maker.test.ts",
+    "test:range-mid-reversion": "tsx --test src/strategies/btc5m/range-mid-reversion.test.ts",
+    "test:conditional-rebound": "tsx --test src/strategies/btc5m/conditional-rebound.test.ts",
     "redeem": "tsx src/redeem.ts",
     "redeem:holdings": "tsx src/redeem-holdings.ts",
     "redeem:proxy": "tsx src/redeem-proxy.ts",

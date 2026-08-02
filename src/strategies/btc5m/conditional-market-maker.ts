@@ -23,6 +23,9 @@ export type Btc5mConditionalMarketMakerParams = {
     minOrderUsdc: number;
     minOrderShares: number;
     minSellProfit: number;
+    forceFlattenSecondsBeforeEnd: number;
+    maxUnpairedSeconds: number;
+    pairOrderMaxAgeSeconds: number;
 };
 
 export type Btc5mConditionalMarketMakerInput = Btc5mMarketMakerInput & {
@@ -41,8 +44,10 @@ export type Btc5mConditionalMarketMetrics = {
 };
 
 export function buildBtc5mConditionalMarketMakerQuotes(input: Btc5mConditionalMarketMakerInput): Btc5mStrategyDecision & { metrics?: Btc5mConditionalMarketMetrics } {
-    const metrics = calculateConditionalMarketMetrics(input.timestampMs, input.btcPrice, input.history, input.conditionalParams);
     const base = buildBtc5mMarketMakerQuotes(input);
+    const recovery = buildInventoryRecoveryQuote(input);
+    if (recovery) return { ...base, quotes: [recovery], reason: recovery.note };
+    const metrics = calculateConditionalMarketMetrics(input.timestampMs, input.btcPrice, input.history, input.conditionalParams);
     if (!metrics) return retainProtectedSells(base, input, "insufficient BTC history");
     if (Math.abs(metrics.accelerationBps) >= input.conditionalParams.maxAccelerationBps) {
         return retainProtectedSells(base, input, `rapid BTC move ${metrics.accelerationBps.toFixed(2)}bps`, metrics);
@@ -64,7 +69,8 @@ export function buildBtc5mConditionalMarketMakerQuotes(input: Btc5mConditionalMa
             const protectedQuote = protectSellPrice(quote, input);
             return protectedQuote ? [protectedQuote] : [];
         });
-    const desiredBuyCount = base.quotes.filter((quote) => quote.side === "BUY").length;
+    if (input.state.entryAttempted) quotes = quotes.filter((quote) => quote.side !== "BUY");
+    const desiredBuyCount = input.state.entryAttempted ? 0 : base.quotes.filter((quote) => quote.side === "BUY").length;
     const validBuyCount = quotes.filter((quote) => quote.side === "BUY").length;
     if (desiredBuyCount === 2 && validBuyCount < 2) quotes = quotes.filter((quote) => quote.side !== "BUY");
     const buyUp = quotes.find((quote) => quote.side === "BUY" && quote.leg === "UP")?.price;
@@ -76,6 +82,61 @@ export function buildBtc5mConditionalMarketMakerQuotes(input: Btc5mConditionalMa
         reason: metrics.favoredLeg ? `conditional skew ${metrics.favoredLeg} momentum=${metrics.momentumBps.toFixed(2)}bps` : "conditional symmetric quote",
         metrics,
     };
+}
+
+function buildInventoryRecoveryQuote(input: Btc5mConditionalMarketMakerInput): Btc5mStrategyQuote | undefined {
+    const imbalance = input.state.qUp - input.state.qDown;
+    if (Math.abs(imbalance) + 1e-9 < input.conditionalParams.minOrderShares) return undefined;
+
+    const heldLeg: Btc5mLeg = imbalance > 0 ? "UP" : "DOWN";
+    const hedgeLeg: Btc5mLeg = heldLeg === "UP" ? "DOWN" : "UP";
+    const shares = Math.abs(imbalance);
+    const heldShares = heldLeg === "UP" ? input.state.qUp : input.state.qDown;
+    const heldCost = heldLeg === "UP" ? input.state.positionCostUp : input.state.positionCostDown;
+    if (!heldCost || heldShares <= 0) return undefined;
+
+    const averageCost = heldCost / heldShares;
+    const heldPrice = heldLeg === "UP" ? input.up : input.down;
+    const hedgePrice = hedgeLeg === "UP" ? input.up : input.down;
+    const unpairedSeconds = input.state.unpairedSinceMs === undefined ? 0 : (input.timestampMs - input.state.unpairedSinceMs) / 1000;
+    if (input.secondsLeft <= input.conditionalParams.forceFlattenSecondsBeforeEnd || unpairedSeconds >= input.conditionalParams.maxUnpairedSeconds) {
+        const sellPrice = heldPrice?.bestBid ?? undefined;
+        const buyPrice = hedgePrice?.bestAsk ?? undefined;
+        const sellLoss = sellPrice === undefined ? Number.POSITIVE_INFINITY : averageCost - sellPrice;
+        const hedgeLoss = buyPrice === undefined ? Number.POSITIVE_INFINITY : averageCost + buyPrice - 1;
+        if (sellLoss <= hedgeLoss && sellPrice !== undefined) {
+            return {
+                key: `${heldLeg}:SELL`, leg: heldLeg, side: "SELL",
+                tokenId: heldLeg === "UP" ? input.upTokenId : input.downTokenId,
+                price: roundToTick(sellPrice, input.params.tick), size: shares,
+                note: `emergency flatten ${heldLeg} before settlement`,
+            };
+        }
+        if (buyPrice !== undefined && canFundHedge(input, hedgeLeg, shares, buyPrice)) {
+            return {
+                key: `${hedgeLeg}:BUY`, leg: hedgeLeg, side: "BUY",
+                tokenId: hedgeLeg === "UP" ? input.upTokenId : input.downTokenId,
+                price: roundToTick(buyPrice, input.params.tick, "ceil"), size: shares,
+                note: `emergency hedge ${hedgeLeg} before settlement`,
+            };
+        }
+        return undefined;
+    }
+
+    const maximumHedgePrice = roundToTick(1 - averageCost - input.params.minLockedEdge, input.params.tick);
+    if (maximumHedgePrice < input.params.tick || !canFundHedge(input, hedgeLeg, shares, maximumHedgePrice)) return undefined;
+    return {
+        key: `${hedgeLeg}:BUY`, leg: hedgeLeg, side: "BUY",
+        tokenId: hedgeLeg === "UP" ? input.upTokenId : input.downTokenId,
+        price: maximumHedgePrice, size: shares,
+        note: `inventory rescue ${hedgeLeg}, locked edge>=${input.params.minLockedEdge.toFixed(4)}`,
+    };
+}
+
+function canFundHedge(input: Btc5mConditionalMarketMakerInput, leg: Btc5mLeg, shares: number, price: number): boolean {
+    const spent = leg === "UP" ? input.state.buyCostUp : input.state.buyCostDown;
+    const pending = leg === "UP" ? input.state.pendingBuyNotionalUp ?? 0 : input.state.pendingBuyNotionalDown ?? 0;
+    return input.params.maxUsdcPerLeg <= 0 || spent + pending + shares * price <= input.params.maxUsdcPerLeg + 1e-9;
 }
 
 function retainProtectedSells(
