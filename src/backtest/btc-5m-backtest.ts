@@ -17,6 +17,8 @@ import { buildBtc5mExtreme020ReboundOrders, Btc5mExtreme020Position } from "../s
 import { buildBtc5mFinal30HighOrders } from "../strategies/btc5m/final-30-high";
 import { buildBtc5mFinal30HedgedOrders, Btc5mFinal30HedgedPosition } from "../strategies/btc5m/final-30-hedged";
 import { buildBtc5mFinal30ManagedOrders, Btc5mFinal30ManagedPosition } from "../strategies/btc5m/final-30-managed";
+import { buildBtc5mUndervaluedHoldOrders, Btc5mUndervaluedHoldPosition } from "../strategies/btc5m/undervalued-hold";
+import { buildBtc5mUndervaluedFinalManagedOrders } from "../strategies/btc5m/undervalued-final-managed";
 import { buildBtc5mDynamicRangePullbackOrders, Btc5mDynamicRangePullbackParams, Btc5mDynamicRangePullbackState } from "../strategies/btc5m/dynamic-range-pullback";
 import { buildBtc5mDynamicRangeFinalManagedOrders } from "../strategies/btc5m/dynamic-range-final-managed";
 import { Btc5mRegimeSnapshot } from "../strategies/btc5m/regime";
@@ -25,7 +27,7 @@ import { buildBtc5mRangeMidReversionOrders, Btc5mRangeMidPosition, Btc5mRangeMid
 import { Btc5mConditionalReboundFeatures, Btc5mConditionalReboundTrainingSample, predictBtc5mConditionalRebound, trainBtc5mConditionalReboundModel } from "../strategies/btc5m/conditional-rebound";
 
 type Leg = "UP" | "DOWN";
-type BacktestStrategy = "edge" | "range-arb" | "range-mid-reversion" | "conditional-rebound" | "market-maker" | "conditional-market-maker" | "hybrid" | "managed-edge" | "adaptive-edge" | "trend-pullback" | "trend-range-switch" | "trend-range-regime" | "trend-range-overlay" | "adaptive-overlay" | "sustained-high" | "latency-scalp" | "deep-rebound" | "extreme-020-rebound" | "final-30-high" | "final-30-hedged" | "final-30-managed" | "dynamic-range-pullback" | "dynamic-range-final-managed";
+type BacktestStrategy = "edge" | "range-arb" | "range-mid-reversion" | "conditional-rebound" | "market-maker" | "conditional-market-maker" | "hybrid" | "managed-edge" | "adaptive-edge" | "trend-pullback" | "trend-range-switch" | "trend-range-regime" | "trend-range-overlay" | "adaptive-overlay" | "sustained-high" | "latency-scalp" | "deep-rebound" | "extreme-020-rebound" | "final-30-high" | "final-30-hedged" | "final-30-managed" | "undervalued-hold" | "undervalued-final-managed" | "dynamic-range-pullback" | "dynamic-range-final-managed";
 
 type BacktestConfig = {
     strategy: BacktestStrategy;
@@ -237,6 +239,13 @@ type BacktestConfig = {
     final30ManagedStopMinBtcReversalBps: number;
     final30ManagedStopConfirmSeconds: number;
     final30ManagedStopMaxDirectionalMarginBps: number;
+    undervaluedHoldMinEntryPrice: number;
+    undervaluedHoldMaxEntryPrice: number;
+    undervaluedHoldOrderShares: number;
+    undervaluedHoldMinSecondsLeftToOpen: number;
+    undervaluedHoldMaxSecondsLeftToOpen: number;
+    undervaluedHoldMinBtcMarginBps: number;
+    undervaluedHoldStopLossPct: number;
     dynamicRangePullbackParams: Btc5mDynamicRangePullbackParams;
     adaptiveOverlayDeepInRange: boolean;
 };
@@ -325,7 +334,7 @@ function envNumber(name: string, fallback: number): number {
 function usage(): string {
     return [
         "Usage:",
-        "  npm run backtest:btc5m -- --strategy <edge|managed-edge|adaptive-edge|conditional-rebound|trend-pullback|sustained-high|latency-scalp|deep-rebound|extreme-020-rebound|range-mid-reversion|final-30-high|final-30-hedged|final-30-managed|dynamic-range-pullback|dynamic-range-final-managed|trend-range-switch|trend-range-regime|trend-range-overlay|adaptive-overlay|range-arb|market-maker|conditional-market-maker|hybrid> --csv <path>",
+        "  npm run backtest:btc5m -- --strategy <edge|managed-edge|adaptive-edge|conditional-rebound|trend-pullback|sustained-high|latency-scalp|deep-rebound|extreme-020-rebound|range-mid-reversion|final-30-high|final-30-hedged|final-30-managed|undervalued-hold|undervalued-final-managed|dynamic-range-pullback|dynamic-range-final-managed|trend-range-switch|trend-range-regime|trend-range-overlay|adaptive-overlay|range-arb|market-maker|conditional-market-maker|hybrid> --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:edge --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:range-arb --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:market-maker --csv <path>",
@@ -339,6 +348,8 @@ function usage(): string {
         "  npm run backtest:btc5m -- --strategy btc5m:final-30-high --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:final-30-hedged --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:final-30-managed --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:undervalued-hold --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:undervalued-final-managed --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:dynamic-range-pullback --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:dynamic-range-final-managed --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:adaptive-overlay --csv <path>",
@@ -388,6 +399,8 @@ function parseStrategy(value: string | undefined): BacktestStrategy {
     if (value === "final-30-high" || value === "btc5m:final-30-high") return "final-30-high";
     if (value === "final-30-hedged" || value === "btc5m:final-30-hedged") return "final-30-hedged";
     if (value === "final-30-managed" || value === "btc5m:final-30-managed") return "final-30-managed";
+    if (value === "undervalued-hold" || value === "btc5m:undervalued-hold") return "undervalued-hold";
+    if (value === "undervalued-final-managed" || value === "btc5m:undervalued-final-managed") return "undervalued-final-managed";
     if (value === "dynamic-range-pullback" || value === "btc5m:dynamic-range-pullback") return "dynamic-range-pullback";
     if (value === "dynamic-range-final-managed" || value === "btc5m:dynamic-range-final-managed") return "dynamic-range-final-managed";
     if (value === "adaptive-overlay" || value === "btc5m:adaptive-overlay") return "adaptive-overlay";
@@ -403,7 +416,7 @@ function loadConfig(): BacktestConfig {
     const strategyArg = getArgValue("--strategy") ?? envString("BACKTEST_STRATEGY", "");
     const csvPath = getArgValue("--csv") ?? envString("BACKTEST_CSV", "");
     const strategy = parseStrategy(strategyArg);
-    const finalManaged = strategy === "final-30-managed";
+    const finalManaged = strategy === "final-30-managed" || strategy === "undervalued-final-managed";
     const cfg: BacktestConfig = {
         strategy,
         csvPath,
@@ -614,6 +627,13 @@ function loadConfig(): BacktestConfig {
         final30ManagedStopMinBtcReversalBps: Number(getArgValue("--final-30-managed-stop-min-btc-reversal-bps") ?? envNumber("FINAL_30_MANAGED_STOP_MIN_BTC_REVERSAL_BPS", 2)),
         final30ManagedStopConfirmSeconds: Number(getArgValue("--final-30-managed-stop-confirm-seconds") ?? envNumber("FINAL_30_MANAGED_STOP_CONFIRM_SECONDS", 2)),
         final30ManagedStopMaxDirectionalMarginBps: Number(getArgValue("--final-30-managed-stop-max-margin-bps") ?? envNumber("FINAL_30_MANAGED_STOP_MAX_DIRECTIONAL_MARGIN_BPS", 999)),
+        undervaluedHoldMinEntryPrice: Number(getArgValue("--undervalued-hold-min-entry") ?? envNumber("UNDERVALUED_HOLD_MIN_ENTRY_PRICE", 0.30)),
+        undervaluedHoldMaxEntryPrice: Number(getArgValue("--undervalued-hold-max-entry") ?? envNumber("UNDERVALUED_HOLD_MAX_ENTRY_PRICE", 0.50)),
+        undervaluedHoldOrderShares: Number(getArgValue("--undervalued-hold-shares") ?? envNumber("UNDERVALUED_HOLD_ORDER_SHARES", 5)),
+        undervaluedHoldMinSecondsLeftToOpen: Number(getArgValue("--undervalued-hold-min-seconds-left") ?? envNumber("UNDERVALUED_HOLD_MIN_SECONDS_LEFT_TO_OPEN", 90)),
+        undervaluedHoldMaxSecondsLeftToOpen: Number(getArgValue("--undervalued-hold-max-seconds-left") ?? envNumber("UNDERVALUED_HOLD_MAX_SECONDS_LEFT_TO_OPEN", 300)),
+        undervaluedHoldMinBtcMarginBps: Number(getArgValue("--undervalued-hold-min-btc-margin-bps") ?? envNumber("UNDERVALUED_HOLD_MIN_BTC_MARGIN_BPS", 1)),
+        undervaluedHoldStopLossPct: Number(getArgValue("--undervalued-hold-stop-loss-pct") ?? envNumber("UNDERVALUED_HOLD_STOP_LOSS_PCT", 0.20)),
         dynamicRangePullbackParams: {
             minContractPullback: envNumber("DYNAMIC_RANGE_PULLBACK_MIN_CONTRACT_PULLBACK", 0.20),
             minOrderNotional: envNumber("DYNAMIC_RANGE_PULLBACK_MIN_ORDER_NOTIONAL", 1.01),
@@ -729,6 +749,7 @@ function loadConfig(): BacktestConfig {
     if (cfg.final30ManagedEarlyBtcMinMoveUsd < 0 || cfg.final30ManagedEarlyBtcMinAsk <= 0.5 || cfg.final30ManagedEarlyBtcMinAsk > cfg.final30HighMaxEntryPrice || cfg.final30ManagedEarlyBtcMaxSecondsLeft <= cfg.final30HighMaxSecondsLeftToOpen || cfg.final30ManagedTrendAtrLookbackSeconds <= 0 || cfg.final30ManagedTrendMinGapSafety < 0 || cfg.final30ManagedTrendMinPeakGapRatio < 0 || cfg.final30ManagedTrendMinPeakGapRatio > 1 || cfg.final30ManagedTrendMaxSpread < 0 || !Number.isInteger(cfg.final30ManagedTimezoneOffsetHours) || cfg.final30ManagedTimezoneOffsetHours < -23 || cfg.final30ManagedTimezoneOffsetHours > 23 || !Number.isInteger(cfg.final30ManagedDayStartHour) || cfg.final30ManagedDayStartHour < 0 || cfg.final30ManagedDayStartHour > 23 || !Number.isInteger(cfg.final30ManagedDayEndHour) || cfg.final30ManagedDayEndHour < 0 || cfg.final30ManagedDayEndHour > 23 || cfg.final30ManagedDayStartHour === cfg.final30ManagedDayEndHour || cfg.final30ManagedDayMinDirectionalMarginBps < 0 || cfg.final30ManagedNightMinDirectionalMarginBps < 0) throw new Error("Invalid final-30-managed early BTC configuration");
     if (!(cfg.final30ManagedTakeProfitDelta >= 0 && cfg.final30ManagedTakeProfitDelta < 1) || !(cfg.final30ManagedStopLossDelta >= 0 && cfg.final30ManagedStopLossDelta < 1)) throw new Error("Invalid final-30-managed exit deltas");
     if (cfg.final30ManagedStopMinBtcReversalBps < 0 || cfg.final30ManagedStopConfirmSeconds < 0 || cfg.final30ManagedStopMaxDirectionalMarginBps < 0) throw new Error("Invalid final-30-managed BTC stop confirmation");
+    if (!(cfg.undervaluedHoldMinEntryPrice > 0 && cfg.undervaluedHoldMinEntryPrice < cfg.undervaluedHoldMaxEntryPrice && cfg.undervaluedHoldMaxEntryPrice < 1) || cfg.undervaluedHoldOrderShares <= 0 || cfg.undervaluedHoldMinSecondsLeftToOpen < 0 || cfg.undervaluedHoldMaxSecondsLeftToOpen <= cfg.undervaluedHoldMinSecondsLeftToOpen || cfg.undervaluedHoldMinBtcMarginBps <= 0 || !(cfg.undervaluedHoldStopLossPct > 0 && cfg.undervaluedHoldStopLossPct < 1)) throw new Error("Invalid undervalued-hold configuration");
     const dynamic = cfg.dynamicRangePullbackParams;
     if (!(dynamic.minContractPullback > 0 && dynamic.minContractPullback < 1) || dynamic.minOrderNotional <= 0 || dynamic.orderShares <= 0 || dynamic.maxPairUsdc < dynamic.minOrderNotional * 2 || dynamic.minLockedProfit < 0 || dynamic.shareStep <= 0 || dynamic.minSecondsLeftToOpen < 0 || dynamic.maxSecondsLeftToOpen <= dynamic.minSecondsLeftToOpen || dynamic.minDirectionalBtcMarginBps < 0 || dynamic.maxBtcRetracementBps < 0 || dynamic.maxSpread <= 0 || dynamic.entryConfirmSeconds < 0 || !(dynamic.earlyPairCost > 0 && dynamic.earlyPairCost <= dynamic.middlePairCost && dynamic.middlePairCost <= dynamic.latePairCost && dynamic.latePairCost < 1) || !(dynamic.stopLossDelta > 0 && dynamic.stopLossDelta < 1) || dynamic.stopConfirmSeconds < 0 || dynamic.maxNakedSeconds < 0) throw new Error("Invalid dynamic-range-pullback configuration");
     return cfg;
@@ -1384,6 +1405,145 @@ function runFinal30ManagedBacktest(rows: MarketRow[], cfg: BacktestConfig): { cy
     const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
     const entries = positions.size;
     console.log(`Final-30-managed: entries=${entries}, takeProfits=${takeProfits}, stopLosses=${stopLosses}, settled=${entries - takeProfits - stopLosses}`);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
+function runUndervaluedHoldBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    const cycles = createCycleMap(rows, cfg);
+    const positions = new Map<string, Btc5mUndervaluedHoldPosition>();
+    let stopLosses = 0;
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+        const position = positions.get(row.slug);
+        const decision = buildBtc5mUndervaluedHoldOrders({
+            timestampMs: row.timestampMs,
+            endMs: cycle.endMs,
+            btcPrice: row.btcPrice,
+            openPrice: cycle.openPrice,
+            upAsk: row.upAsk,
+            downAsk: row.downAsk,
+            upBid: row.upBid,
+            downBid: row.downBid,
+            position,
+            blocked: Boolean(position),
+            params: {
+                minEntryPrice: cfg.undervaluedHoldMinEntryPrice,
+                maxEntryPrice: cfg.undervaluedHoldMaxEntryPrice,
+                orderShares: cfg.undervaluedHoldOrderShares,
+                minSecondsLeftToOpen: cfg.undervaluedHoldMinSecondsLeftToOpen,
+                maxSecondsLeftToOpen: cfg.undervaluedHoldMaxSecondsLeftToOpen,
+                minDirectionalBtcMarginBps: cfg.undervaluedHoldMinBtcMarginBps,
+                stopLossPct: cfg.undervaluedHoldStopLossPct,
+            },
+        });
+        if (position && decision.position) positions.set(row.slug, decision.position);
+        const quote = decision.quotes[0];
+        if (!quote) continue;
+        if (quote.side === "BUY" && !position) {
+            const ask = quote.leg === "UP" ? row.upAsk : row.downAsk;
+            if (ask <= 0 || ask >= 1 || ask > quote.price + 1e-9) continue;
+            buyAtPrice(cycle, row, quote.leg, ask, ask * quote.size, quote.fair, quote.edge, quote.note);
+            positions.set(row.slug, { leg: quote.leg, entryPrice: ask, shares: quote.size, exited: false });
+        } else if (quote.side === "SELL" && position && !position.exited) {
+            const bid = quote.leg === "UP" ? row.upBid : row.downBid;
+            if (bid === undefined || bid <= 0 || bid + 1e-9 < quote.price) continue;
+            sellAtPrice(cycle, row, quote.leg, quote.price, quote.size, quote.fair, quote.edge, quote.note);
+            (decision.position ?? position).exited = true;
+            stopLosses++;
+        }
+    }
+    settleManagedCycles(cycles);
+    const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
+    console.log(`Undervalued-hold: entries=${positions.size}, stopLosses=${stopLosses}, settled=${positions.size - stopLosses}`);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
+function runUndervaluedFinalManagedBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    const cycles = createCycleMap(rows, cfg);
+    const undervaluedPositions = new Map<string, Btc5mUndervaluedHoldPosition>();
+    const finalPositions = new Map<string, Btc5mFinal30ManagedPosition>();
+    const historyByCycle = new Map<string, Btc5mRegimeSnapshot[]>();
+    const finalBlocked = new Set<string>();
+    let undervaluedEntries = 0;
+    let undervaluedStops = 0;
+    let finalEntries = 0;
+    let finalStops = 0;
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+        const history = historyByCycle.get(row.slug) ?? [];
+        history.push({ t: row.timestampMs, upAsk: row.upAsk, downAsk: row.downAsk, btcPrice: row.btcPrice });
+        historyByCycle.set(row.slug, history);
+        const undervaluedPosition = undervaluedPositions.get(row.slug);
+        const finalPosition = finalPositions.get(row.slug);
+        const decision = buildBtc5mUndervaluedFinalManagedOrders({
+            timestampMs: row.timestampMs,
+            endMs: cycle.endMs,
+            btcPrice: row.btcPrice,
+            openPrice: cycle.openPrice,
+            upAsk: row.upAsk,
+            downAsk: row.downAsk,
+            upBid: row.upBid,
+            downBid: row.downBid,
+            history,
+            undervaluedPosition,
+            undervaluedBlocked: Boolean(undervaluedPosition),
+            undervaluedParams: {
+                minEntryPrice: cfg.undervaluedHoldMinEntryPrice,
+                maxEntryPrice: cfg.undervaluedHoldMaxEntryPrice,
+                orderShares: cfg.undervaluedHoldOrderShares,
+                minSecondsLeftToOpen: Math.max(30, cfg.undervaluedHoldMinSecondsLeftToOpen),
+                maxSecondsLeftToOpen: cfg.undervaluedHoldMaxSecondsLeftToOpen,
+                minDirectionalBtcMarginBps: cfg.undervaluedHoldMinBtcMarginBps,
+                stopLossPct: cfg.undervaluedHoldStopLossPct,
+            },
+            finalPosition,
+            finalBlocked: finalBlocked.has(row.slug),
+            finalParams: final30ManagedParams(cfg),
+        });
+        if (decision.undervaluedPosition) undervaluedPositions.set(row.slug, decision.undervaluedPosition);
+        if (decision.finalPosition) finalPositions.set(row.slug, decision.finalPosition);
+        if (decision.component === "final" && decision.reason?.includes("blocked:")) finalBlocked.add(row.slug);
+        const quote = decision.quotes[0];
+        if (!quote) continue;
+        if (quote.side === "BUY") {
+            const activePosition = decision.component === "final" ? finalPosition : undervaluedPosition;
+            if (activePosition) continue;
+            const ask = quote.leg === "UP" ? row.upAsk : row.downAsk;
+            if (ask <= 0 || ask >= 1 || ask > quote.price + 1e-9) continue;
+            buyAtPrice(cycle, row, quote.leg, ask, ask * quote.size, quote.fair, quote.edge, `${decision.component}; ${quote.note ?? ""}`);
+            if (decision.component === "final") {
+                finalPositions.set(row.slug, { leg: quote.leg, entryPrice: ask, entryBtcPrice: row.btcPrice, shares: quote.size, exited: false });
+                finalEntries++;
+            } else {
+                undervaluedPositions.set(row.slug, { leg: quote.leg, entryPrice: ask, shares: quote.size, exited: false });
+                undervaluedEntries++;
+            }
+        } else {
+            const position = decision.component === "final" ? finalPosition : undervaluedPosition;
+            if (!position || position.exited) continue;
+            const bid = quote.leg === "UP" ? row.upBid : row.downBid;
+            if (bid === undefined || bid <= 0 || bid + 1e-9 < quote.price) continue;
+            sellAtPrice(cycle, row, quote.leg, quote.price, quote.size, quote.fair, quote.edge, `${decision.component}; ${quote.note ?? ""}`);
+            if (decision.component === "final") {
+                const exitedPosition = decision.finalPosition ?? position as Btc5mFinal30ManagedPosition;
+                exitedPosition.exited = true;
+                finalPositions.set(row.slug, exitedPosition);
+                finalStops++;
+            } else {
+                const exitedPosition = decision.undervaluedPosition ?? position as Btc5mUndervaluedHoldPosition;
+                exitedPosition.exited = true;
+                undervaluedPositions.set(row.slug, exitedPosition);
+                undervaluedStops++;
+            }
+        }
+    }
+    settleManagedCycles(cycles);
+    const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
+    console.log(`Undervalued-final-managed: undervalued entries=${undervaluedEntries}, stops=${undervaluedStops}; final entries=${finalEntries}, stops=${finalStops}`);
     return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
 }
 
@@ -2465,7 +2625,7 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
     console.log(`Strategy: ${cfg.strategy}`);
     console.log(`CSV: ${cfg.csvPath}`);
     console.log(`Cycles: ${cycles.length}, traded cycles: ${tradedCycles}`);
-    if (cfg.strategy === "conditional-market-maker" || cfg.strategy === "range-mid-reversion" || cfg.strategy === "conditional-rebound" || cfg.strategy === "trend-pullback" || cfg.strategy === "sustained-high" || cfg.strategy === "latency-scalp" || cfg.strategy === "deep-rebound" || cfg.strategy === "extreme-020-rebound" || cfg.strategy === "final-30-high" || cfg.strategy === "final-30-hedged" || cfg.strategy === "final-30-managed" || cfg.strategy === "dynamic-range-pullback" || cfg.strategy === "dynamic-range-final-managed" || cfg.strategy === "trend-range-switch" || cfg.strategy === "trend-range-regime" || cfg.strategy === "trend-range-overlay" || cfg.strategy === "adaptive-overlay") {
+    if (cfg.strategy === "conditional-market-maker" || cfg.strategy === "range-mid-reversion" || cfg.strategy === "conditional-rebound" || cfg.strategy === "trend-pullback" || cfg.strategy === "sustained-high" || cfg.strategy === "latency-scalp" || cfg.strategy === "deep-rebound" || cfg.strategy === "extreme-020-rebound" || cfg.strategy === "final-30-high" || cfg.strategy === "final-30-hedged" || cfg.strategy === "final-30-managed" || cfg.strategy === "undervalued-hold" || cfg.strategy === "undervalued-final-managed" || cfg.strategy === "dynamic-range-pullback" || cfg.strategy === "dynamic-range-final-managed" || cfg.strategy === "trend-range-switch" || cfg.strategy === "trend-range-regime" || cfg.strategy === "trend-range-overlay" || cfg.strategy === "adaptive-overlay") {
         const entries = trades.filter((trade) => trade.cost > 0);
         const profitableCycles = cycles.filter((cycle) => {
             const cost = cycle.trades.reduce((sum, trade) => sum + trade.cost, 0);
@@ -2515,6 +2675,10 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
         console.log(`Params: ask>=${cfg.final30HighTriggerPrice} in final ${cfg.final30HighMaxSecondsLeftToOpen}s, maxEntry=${cfg.final30HighMaxEntryPrice}, shares=${cfg.final30HighOrderShares}, maxPairCost=${cfg.final30HedgedMaxPairCost}`);
     } else if (cfg.strategy === "final-30-managed") {
         console.log(`Params: ask>=${cfg.final30HighTriggerPrice} in final ${cfg.final30HighMaxSecondsLeftToOpen}s, earlyBtcMove=$${cfg.final30ManagedEarlyBtcMinMoveUsd}/ask>=${cfg.final30ManagedEarlyBtcMinAsk}/until=${cfg.final30ManagedEarlyBtcMaxSecondsLeft}s, direction=${cfg.final30ManagedBtcDirectionRequired}, BTC margin day=${cfg.final30ManagedDayMinDirectionalMarginBps}bps/night=${cfg.final30ManagedNightMinDirectionalMarginBps}bps (${cfg.final30ManagedDayStartHour}:00-${cfg.final30ManagedDayEndHour}:00 UTC${cfg.final30ManagedTimezoneOffsetHours >= 0 ? "+" : ""}${cfg.final30ManagedTimezoneOffsetHours}), gapSafety>=${cfg.final30ManagedTrendMinGapSafety}, peakRatio>=${cfg.final30ManagedTrendMinPeakGapRatio}, spread<=${cfg.final30ManagedTrendMaxSpread}, maxEntry=${cfg.final30HighMaxEntryPrice}, shares=${cfg.final30HighOrderShares}, takeProfitDelta=${cfg.final30ManagedTakeProfitDelta}, stopLossDelta=${cfg.final30ManagedStopLossDelta}, stopBtcReversal=${cfg.final30ManagedStopMinBtcReversalBps}bps, stopConfirm=${cfg.final30ManagedStopConfirmSeconds}s, stopMaxMargin=${cfg.final30ManagedStopMaxDirectionalMarginBps}bps`);
+    } else if (cfg.strategy === "undervalued-hold") {
+        console.log(`Params: entry=(${cfg.undervaluedHoldMinEntryPrice},${cfg.undervaluedHoldMaxEntryPrice}), BTC margin>=${cfg.undervaluedHoldMinBtcMarginBps}bps, secondsLeft=${cfg.undervaluedHoldMinSecondsLeftToOpen}-${cfg.undervaluedHoldMaxSecondsLeftToOpen}, shares=${cfg.undervaluedHoldOrderShares}, stopLossPct=${cfg.undervaluedHoldStopLossPct}, takeProfit=off`);
+    } else if (cfg.strategy === "undervalued-final-managed") {
+        console.log(`Params: undervalued entry=(${cfg.undervaluedHoldMinEntryPrice},${cfg.undervaluedHoldMaxEntryPrice}), BTC margin>=${cfg.undervaluedHoldMinBtcMarginBps}bps, window=${Math.max(30, cfg.undervaluedHoldMinSecondsLeftToOpen)}-${cfg.undervaluedHoldMaxSecondsLeftToOpen}s, stopLossPct=${cfg.undervaluedHoldStopLossPct}; final window=${cfg.final30HighMinSecondsLeftToOpen}-${cfg.final30HighEarlyMaxSecondsLeftToOpen}s, trigger=${cfg.final30HighTriggerPrice}, shares=${cfg.final30HighOrderShares}`);
     } else if (cfg.strategy === "dynamic-range-pullback") {
         const params = cfg.dynamicRangePullbackParams;
         console.log(`Params: contractPullback>=${params.minContractPullback}, entry=currentAsk, syntheticSell=${params.syntheticSell}, dynamicSizing=${params.dynamicSizing}, minShares=${params.orderShares}, pairCap=${params.maxPairUsdc}, lockedProfit>=${params.minLockedProfit}, secondsLeft=${params.minSecondsLeftToOpen}-${params.maxSecondsLeftToOpen}, confirm=${params.entryConfirmSeconds}s, btcMargin>=${params.minDirectionalBtcMarginBps}bps, btcRetracement<=${params.maxBtcRetracementBps}bps, pairCosts=${params.earlyPairCost}/${params.middlePairCost}/${params.latePairCost}, stopDelta=${params.stopLossDelta}, maxNaked=${params.maxNakedSeconds}s`);
@@ -2901,6 +3065,10 @@ function runStrategy(cfg: BacktestConfig, records: Record<string, string>[]): { 
             return runFinal30HedgedBacktest(rows, cfg);
         case "final-30-managed":
             return runFinal30ManagedBacktest(rows, cfg);
+        case "undervalued-hold":
+            return runUndervaluedHoldBacktest(rows, cfg);
+        case "undervalued-final-managed":
+            return runUndervaluedFinalManagedBacktest(rows, cfg);
         case "dynamic-range-pullback":
             return runDynamicRangePullbackBacktest(rows, cfg);
         case "dynamic-range-final-managed":

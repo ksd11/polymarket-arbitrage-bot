@@ -336,6 +336,34 @@ LOG_FILE_PATH="logs/final-30-managed-$RUN_ID.log" \
 npm run btc5m:final-30-managed
 ```
 
+Backtest the BTC-directional undervaluation strategy. It buys the BTC-aligned leg between `0.30` and `0.50`, stops at a 20% contract loss, and otherwise holds to settlement without taking profit:
+
+```bash
+npm run backtest:btc5m -- --strategy btc5m:undervalued-hold --csv data/btc5m-history-3days.csv
+```
+
+Dry-run it live while retaining both trajectory and console logs:
+
+```bash
+RUN_ID=$(date +%Y%m%d-%H%M%S)
+UNDERVALUED_HOLD_DRY_RUN=true \
+UNDERVALUED_HOLD_RECORD_FILE="data/undervalued-hold-$RUN_ID.csv" \
+LOG_FILE_PATH="logs/undervalued-hold-$RUN_ID.log" \
+npm run btc5m:undervalued-hold
+```
+
+Combine it with `final-30-managed`. The undervaluation component never opens during the final 30 seconds; the final component may enter only when there is no active undervaluation position or order:
+
+```bash
+npm run backtest:btc5m -- --strategy btc5m:undervalued-final-managed --csv data/btc5m-history-3days.csv
+
+RUN_ID=$(date +%Y%m%d-%H%M%S)
+UNDERVALUED_FINAL_MANAGED_DRY_RUN=true \
+UNDERVALUED_FINAL_MANAGED_RECORD_FILE="data/undervalued-final-managed-$RUN_ID.csv" \
+LOG_FILE_PATH="logs/undervalued-final-managed-$RUN_ID.log" \
+npm run btc5m:undervalued-final-managed
+```
+
 Backtest the trend-pullback entry with a time-dependent complementary hedge:
 
 ```bash
