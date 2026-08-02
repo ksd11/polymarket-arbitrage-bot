@@ -68,3 +68,16 @@ test("sells the full position at a twenty percent loss", () => {
     assert.equal(decision.quotes[0]?.price, 0.36);
     assert.equal(decision.quotes[0]?.size, 5);
 });
+
+test("holds to settlement when stop loss is disabled", () => {
+    const decision = buildBtc5mUndervaluedHoldOrders({
+        timestampMs: 200_000,
+        endMs: 300_000,
+        upBid: 0.01,
+        position: { leg: "UP", entryPrice: 0.45, shares: 5, exited: false },
+        blocked: true,
+        params: { ...params, stopLossPct: 0 },
+    });
+    assert.equal(decision.quotes.length, 0);
+    assert.match(decision.reason ?? "", /disabled/);
+});

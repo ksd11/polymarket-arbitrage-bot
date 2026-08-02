@@ -76,6 +76,7 @@ function buildExitDecision(input: Btc5mUndervaluedHoldInput): Btc5mUndervaluedHo
     if (position.exited) return { quotes: [], position, reason: "undervalued-hold exited" };
     const bid = position.leg === "UP" ? input.upBid : input.downBid;
     if (bid === undefined || bid <= 0) return { quotes: [], position, reason: "undervalued-hold holding; waiting for bid" };
+    if (input.params.stopLossPct <= 0) return { quotes: [], position, reason: "undervalued-hold holding to settlement; stop loss disabled" };
     const stopPrice = position.entryPrice * (1 - input.params.stopLossPct);
     if (bid > stopPrice) {
         return { quotes: [], position, reason: `undervalued-hold holding to settlement; bid=${bid.toFixed(2)} stop=${stopPrice.toFixed(3)}` };
