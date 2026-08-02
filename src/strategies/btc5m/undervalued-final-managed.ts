@@ -48,6 +48,7 @@ function buildUndervaluedDecision(input: Btc5mUndervaluedFinalManagedInput): Btc
         downAsk: input.downAsk,
         upBid: input.upBid,
         downBid: input.downBid,
+        history: input.history,
         position: input.undervaluedPosition,
         blocked: input.undervaluedBlocked,
         params: input.undervaluedParams,

@@ -1,3 +1,5 @@
+import { fairUpProbability } from "./edge";
+import { Btc5mRegimeSnapshot } from "./regime";
 import { Btc5mLeg, Btc5mStrategyDecision } from "./types";
 
 export type Btc5mUndervaluedHoldParams = {
@@ -7,6 +9,12 @@ export type Btc5mUndervaluedHoldParams = {
     minSecondsLeftToOpen: number;
     maxSecondsLeftToOpen: number;
     minDirectionalBtcMarginBps: number;
+    minEdge: number;
+    volatilityLookbackSeconds: number;
+    volatilityMinSamples: number;
+    minVolPerInterval: number;
+    maxVolPerInterval: number;
+    maxSpread: number;
     stopLossPct: number;
 };
 
@@ -26,6 +34,7 @@ export type Btc5mUndervaluedHoldInput = {
     downAsk?: number;
     upBid?: number;
     downBid?: number;
+    history?: Btc5mRegimeSnapshot[];
     position?: Btc5mUndervaluedHoldPosition;
     blocked: boolean;
     params: Btc5mUndervaluedHoldParams;
@@ -54,8 +63,26 @@ export function buildBtc5mUndervaluedHoldOrders(input: Btc5mUndervaluedHoldInput
     }
 
     const ask = leg === "UP" ? input.upAsk : input.downAsk;
-    if (ask === undefined || ask <= input.params.minEntryPrice || ask >= input.params.maxEntryPrice) {
-        return { quotes: [], reason: `undervalued-hold ${leg} ask ${ask?.toFixed(2) ?? "n/a"} outside (${input.params.minEntryPrice.toFixed(2)}, ${input.params.maxEntryPrice.toFixed(2)})` };
+    if (ask === undefined || ask < input.params.minEntryPrice || ask > input.params.maxEntryPrice) {
+        return { quotes: [], reason: `undervalued-hold ${leg} ask ${ask?.toFixed(2) ?? "n/a"} outside [${input.params.minEntryPrice.toFixed(2)}, ${input.params.maxEntryPrice.toFixed(2)}]` };
+    }
+    const bid = leg === "UP" ? input.upBid : input.downBid;
+    const spread = bid === undefined ? Number.POSITIVE_INFINITY : ask - bid;
+    if (input.params.maxSpread > 0 && spread > input.params.maxSpread) {
+        return { quotes: [], reason: `undervalued-hold spread ${spread.toFixed(3)} above ${input.params.maxSpread.toFixed(3)}` };
+    }
+    const volPerInterval = calculateRealtimeVolPerInterval(input.history, input.timestampMs, input.params);
+    if (volPerInterval === undefined) {
+        return { quotes: [], reason: `undervalued-hold waiting for ${input.params.volatilityMinSamples} volatility samples` };
+    }
+    const fairUp = fairUpProbability(input.btcPrice, input.openPrice, input.endMs - input.timestampMs, { intervalMinutes: 5, volPerInterval });
+    const fair = leg === "UP" ? fairUp : 1 - fairUp;
+    const askSum = (input.upAsk ?? 0) + (input.downAsk ?? 0);
+    if (askSum <= 0) return { quotes: [], reason: "undervalued-hold waiting for complete market prices" };
+    const marketProbability = ask / askSum;
+    const edge = fair - marketProbability;
+    if (edge < input.params.minEdge) {
+        return { quotes: [], fairUp, fairDown: 1 - fairUp, reason: `undervalued-hold edge ${edge.toFixed(3)} below ${input.params.minEdge.toFixed(3)} fair=${fair.toFixed(3)} market=${marketProbability.toFixed(3)} vol5m=${(volPerInterval * 10_000).toFixed(2)}bps` };
     }
 
     return {
@@ -65,10 +92,34 @@ export function buildBtc5mUndervaluedHoldOrders(input: Btc5mUndervaluedHoldInput
             side: "BUY",
             price: ask,
             size: input.params.orderShares,
-            note: `undervalued-hold entry ${leg} ask=${ask.toFixed(2)} btcMargin=${directionalMarginBps.toFixed(2)}bps`,
+            fair,
+            edge,
+            note: `undervalued-hold entry ${leg} ask=${ask.toFixed(2)} fair=${fair.toFixed(3)} market=${marketProbability.toFixed(3)} edge=${edge.toFixed(3)} vol5m=${(volPerInterval * 10_000).toFixed(2)}bps btcMargin=${directionalMarginBps.toFixed(2)}bps`,
         }],
-        reason: `undervalued-hold ${leg} underpriced versus BTC direction`,
+        fairUp,
+        fairDown: 1 - fairUp,
+        reason: `undervalued-hold ${leg} realtime-vol edge signal`,
     };
+}
+
+export function calculateRealtimeVolPerInterval(history: Btc5mRegimeSnapshot[] | undefined, timestampMs: number, params: Pick<Btc5mUndervaluedHoldParams, "volatilityLookbackSeconds" | "volatilityMinSamples" | "minVolPerInterval" | "maxVolPerInterval">): number | undefined {
+    const cutoff = timestampMs - params.volatilityLookbackSeconds * 1000;
+    const buckets = new Map<number, number>();
+    for (const point of history ?? []) {
+        if (point.t < cutoff || point.t > timestampMs || !point.btcPrice || point.btcPrice <= 0) continue;
+        buckets.set(Math.floor(point.t / 1000), point.btcPrice);
+    }
+    const prices = Array.from(buckets.entries()).sort((left, right) => left[0] - right[0]).map((entry) => entry[1]);
+    if (prices.length < params.volatilityMinSamples) return undefined;
+    const squaredReturns: number[] = [];
+    for (let index = 1; index < prices.length; index++) {
+        const logReturn = Math.log(prices[index] / prices[index - 1]);
+        if (Number.isFinite(logReturn)) squaredReturns.push(logReturn * logReturn);
+    }
+    if (squaredReturns.length === 0) return undefined;
+    const rmsOneSecondVol = Math.sqrt(squaredReturns.reduce((sum, value) => sum + value, 0) / squaredReturns.length);
+    const volPerInterval = rmsOneSecondVol * Math.sqrt(300);
+    return Math.min(params.maxVolPerInterval, Math.max(params.minVolPerInterval, volPerInterval));
 }
 
 function buildExitDecision(input: Btc5mUndervaluedHoldInput): Btc5mUndervaluedHoldDecision {

@@ -336,7 +336,7 @@ LOG_FILE_PATH="logs/final-30-managed-$RUN_ID.log" \
 npm run btc5m:final-30-managed
 ```
 
-Backtest the BTC-directional undervaluation strategy. It buys the BTC-aligned leg between `0.30` and `0.50`, stops at a 20% contract loss, and otherwise holds to settlement without taking profit:
+Backtest the BTC-directional undervaluation strategy. It estimates five-minute volatility from the latest 60 seconds of BTC samples, converts BTC/open-price distance and remaining time into a fair probability, and buys only when `fairProbability - normalizedMarketProbability >= 0.12`. The default executable ask range is `0.30–0.60`, including an exact `0.50`; it stops at a 20% contract loss and otherwise holds to settlement without taking profit.
 
 ```bash
 npm run backtest:btc5m -- --strategy btc5m:undervalued-hold --csv data/btc5m-history-3days.csv

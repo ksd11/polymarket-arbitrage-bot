@@ -245,6 +245,12 @@ type BacktestConfig = {
     undervaluedHoldMinSecondsLeftToOpen: number;
     undervaluedHoldMaxSecondsLeftToOpen: number;
     undervaluedHoldMinBtcMarginBps: number;
+    undervaluedHoldMinEdge: number;
+    undervaluedHoldVolatilityLookbackSeconds: number;
+    undervaluedHoldVolatilityMinSamples: number;
+    undervaluedHoldMinVolPerInterval: number;
+    undervaluedHoldMaxVolPerInterval: number;
+    undervaluedHoldMaxSpread: number;
     undervaluedHoldStopLossPct: number;
     dynamicRangePullbackParams: Btc5mDynamicRangePullbackParams;
     adaptiveOverlayDeepInRange: boolean;
@@ -628,11 +634,17 @@ function loadConfig(): BacktestConfig {
         final30ManagedStopConfirmSeconds: Number(getArgValue("--final-30-managed-stop-confirm-seconds") ?? envNumber("FINAL_30_MANAGED_STOP_CONFIRM_SECONDS", 2)),
         final30ManagedStopMaxDirectionalMarginBps: Number(getArgValue("--final-30-managed-stop-max-margin-bps") ?? envNumber("FINAL_30_MANAGED_STOP_MAX_DIRECTIONAL_MARGIN_BPS", 999)),
         undervaluedHoldMinEntryPrice: Number(getArgValue("--undervalued-hold-min-entry") ?? envNumber("UNDERVALUED_HOLD_MIN_ENTRY_PRICE", 0.30)),
-        undervaluedHoldMaxEntryPrice: Number(getArgValue("--undervalued-hold-max-entry") ?? envNumber("UNDERVALUED_HOLD_MAX_ENTRY_PRICE", 0.50)),
+        undervaluedHoldMaxEntryPrice: Number(getArgValue("--undervalued-hold-max-entry") ?? envNumber("UNDERVALUED_HOLD_MAX_ENTRY_PRICE", 0.60)),
         undervaluedHoldOrderShares: Number(getArgValue("--undervalued-hold-shares") ?? envNumber("UNDERVALUED_HOLD_ORDER_SHARES", 5)),
         undervaluedHoldMinSecondsLeftToOpen: Number(getArgValue("--undervalued-hold-min-seconds-left") ?? envNumber("UNDERVALUED_HOLD_MIN_SECONDS_LEFT_TO_OPEN", 90)),
         undervaluedHoldMaxSecondsLeftToOpen: Number(getArgValue("--undervalued-hold-max-seconds-left") ?? envNumber("UNDERVALUED_HOLD_MAX_SECONDS_LEFT_TO_OPEN", 300)),
         undervaluedHoldMinBtcMarginBps: Number(getArgValue("--undervalued-hold-min-btc-margin-bps") ?? envNumber("UNDERVALUED_HOLD_MIN_BTC_MARGIN_BPS", 1)),
+        undervaluedHoldMinEdge: Number(getArgValue("--undervalued-hold-min-edge") ?? envNumber("UNDERVALUED_HOLD_MIN_EDGE", 0.12)),
+        undervaluedHoldVolatilityLookbackSeconds: Number(getArgValue("--undervalued-hold-vol-lookback") ?? envNumber("UNDERVALUED_HOLD_VOLATILITY_LOOKBACK_SECONDS", 60)),
+        undervaluedHoldVolatilityMinSamples: Number(getArgValue("--undervalued-hold-vol-min-samples") ?? envNumber("UNDERVALUED_HOLD_VOLATILITY_MIN_SAMPLES", 20)),
+        undervaluedHoldMinVolPerInterval: Number(getArgValue("--undervalued-hold-min-vol-5m") ?? envNumber("UNDERVALUED_HOLD_MIN_VOL_PER_5M", 0.0005)),
+        undervaluedHoldMaxVolPerInterval: Number(getArgValue("--undervalued-hold-max-vol-5m") ?? envNumber("UNDERVALUED_HOLD_MAX_VOL_PER_5M", 0.005)),
+        undervaluedHoldMaxSpread: Number(getArgValue("--undervalued-hold-max-spread") ?? envNumber("UNDERVALUED_HOLD_MAX_SPREAD", 0.03)),
         undervaluedHoldStopLossPct: Number(getArgValue("--undervalued-hold-stop-loss-pct") ?? envNumber("UNDERVALUED_HOLD_STOP_LOSS_PCT", 0.20)),
         dynamicRangePullbackParams: {
             minContractPullback: envNumber("DYNAMIC_RANGE_PULLBACK_MIN_CONTRACT_PULLBACK", 0.20),
@@ -749,7 +761,7 @@ function loadConfig(): BacktestConfig {
     if (cfg.final30ManagedEarlyBtcMinMoveUsd < 0 || cfg.final30ManagedEarlyBtcMinAsk <= 0.5 || cfg.final30ManagedEarlyBtcMinAsk > cfg.final30HighMaxEntryPrice || cfg.final30ManagedEarlyBtcMaxSecondsLeft <= cfg.final30HighMaxSecondsLeftToOpen || cfg.final30ManagedTrendAtrLookbackSeconds <= 0 || cfg.final30ManagedTrendMinGapSafety < 0 || cfg.final30ManagedTrendMinPeakGapRatio < 0 || cfg.final30ManagedTrendMinPeakGapRatio > 1 || cfg.final30ManagedTrendMaxSpread < 0 || !Number.isInteger(cfg.final30ManagedTimezoneOffsetHours) || cfg.final30ManagedTimezoneOffsetHours < -23 || cfg.final30ManagedTimezoneOffsetHours > 23 || !Number.isInteger(cfg.final30ManagedDayStartHour) || cfg.final30ManagedDayStartHour < 0 || cfg.final30ManagedDayStartHour > 23 || !Number.isInteger(cfg.final30ManagedDayEndHour) || cfg.final30ManagedDayEndHour < 0 || cfg.final30ManagedDayEndHour > 23 || cfg.final30ManagedDayStartHour === cfg.final30ManagedDayEndHour || cfg.final30ManagedDayMinDirectionalMarginBps < 0 || cfg.final30ManagedNightMinDirectionalMarginBps < 0) throw new Error("Invalid final-30-managed early BTC configuration");
     if (!(cfg.final30ManagedTakeProfitDelta >= 0 && cfg.final30ManagedTakeProfitDelta < 1) || !(cfg.final30ManagedStopLossDelta >= 0 && cfg.final30ManagedStopLossDelta < 1)) throw new Error("Invalid final-30-managed exit deltas");
     if (cfg.final30ManagedStopMinBtcReversalBps < 0 || cfg.final30ManagedStopConfirmSeconds < 0 || cfg.final30ManagedStopMaxDirectionalMarginBps < 0) throw new Error("Invalid final-30-managed BTC stop confirmation");
-    if (!(cfg.undervaluedHoldMinEntryPrice > 0 && cfg.undervaluedHoldMinEntryPrice < cfg.undervaluedHoldMaxEntryPrice && cfg.undervaluedHoldMaxEntryPrice < 1) || cfg.undervaluedHoldOrderShares <= 0 || cfg.undervaluedHoldMinSecondsLeftToOpen < 0 || cfg.undervaluedHoldMaxSecondsLeftToOpen <= cfg.undervaluedHoldMinSecondsLeftToOpen || cfg.undervaluedHoldMinBtcMarginBps <= 0 || !(cfg.undervaluedHoldStopLossPct >= 0 && cfg.undervaluedHoldStopLossPct < 1)) throw new Error("Invalid undervalued-hold configuration");
+    if (!(cfg.undervaluedHoldMinEntryPrice > 0 && cfg.undervaluedHoldMinEntryPrice < cfg.undervaluedHoldMaxEntryPrice && cfg.undervaluedHoldMaxEntryPrice < 1) || cfg.undervaluedHoldOrderShares <= 0 || cfg.undervaluedHoldMinSecondsLeftToOpen < 0 || cfg.undervaluedHoldMaxSecondsLeftToOpen <= cfg.undervaluedHoldMinSecondsLeftToOpen || cfg.undervaluedHoldMinBtcMarginBps <= 0 || cfg.undervaluedHoldMinEdge < 0 || cfg.undervaluedHoldVolatilityLookbackSeconds <= 0 || cfg.undervaluedHoldVolatilityMinSamples < 2 || !(cfg.undervaluedHoldMinVolPerInterval > 0 && cfg.undervaluedHoldMinVolPerInterval <= cfg.undervaluedHoldMaxVolPerInterval) || cfg.undervaluedHoldMaxSpread < 0 || !(cfg.undervaluedHoldStopLossPct >= 0 && cfg.undervaluedHoldStopLossPct < 1)) throw new Error("Invalid undervalued-hold configuration");
     const dynamic = cfg.dynamicRangePullbackParams;
     if (!(dynamic.minContractPullback > 0 && dynamic.minContractPullback < 1) || dynamic.minOrderNotional <= 0 || dynamic.orderShares <= 0 || dynamic.maxPairUsdc < dynamic.minOrderNotional * 2 || dynamic.minLockedProfit < 0 || dynamic.shareStep <= 0 || dynamic.minSecondsLeftToOpen < 0 || dynamic.maxSecondsLeftToOpen <= dynamic.minSecondsLeftToOpen || dynamic.minDirectionalBtcMarginBps < 0 || dynamic.maxBtcRetracementBps < 0 || dynamic.maxSpread <= 0 || dynamic.entryConfirmSeconds < 0 || !(dynamic.earlyPairCost > 0 && dynamic.earlyPairCost <= dynamic.middlePairCost && dynamic.middlePairCost <= dynamic.latePairCost && dynamic.latePairCost < 1) || !(dynamic.stopLossDelta > 0 && dynamic.stopLossDelta < 1) || dynamic.stopConfirmSeconds < 0 || dynamic.maxNakedSeconds < 0) throw new Error("Invalid dynamic-range-pullback configuration");
     return cfg;
@@ -1411,11 +1423,15 @@ function runFinal30ManagedBacktest(rows: MarketRow[], cfg: BacktestConfig): { cy
 function runUndervaluedHoldBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
     const cycles = createCycleMap(rows, cfg);
     const positions = new Map<string, Btc5mUndervaluedHoldPosition>();
+    const historyByCycle = new Map<string, Btc5mRegimeSnapshot[]>();
     let stopLosses = 0;
     for (const row of rows) {
         const cycle = cycles.get(row.slug)!;
         updateWinner(cycle, row);
         if (row.rowType === "resolution") continue;
+        const history = historyByCycle.get(row.slug) ?? [];
+        history.push({ t: row.timestampMs, upAsk: row.upAsk, downAsk: row.downAsk, btcPrice: row.btcPrice });
+        historyByCycle.set(row.slug, history);
         const position = positions.get(row.slug);
         const decision = buildBtc5mUndervaluedHoldOrders({
             timestampMs: row.timestampMs,
@@ -1426,17 +1442,10 @@ function runUndervaluedHoldBacktest(rows: MarketRow[], cfg: BacktestConfig): { c
             downAsk: row.downAsk,
             upBid: row.upBid,
             downBid: row.downBid,
+            history,
             position,
             blocked: Boolean(position),
-            params: {
-                minEntryPrice: cfg.undervaluedHoldMinEntryPrice,
-                maxEntryPrice: cfg.undervaluedHoldMaxEntryPrice,
-                orderShares: cfg.undervaluedHoldOrderShares,
-                minSecondsLeftToOpen: cfg.undervaluedHoldMinSecondsLeftToOpen,
-                maxSecondsLeftToOpen: cfg.undervaluedHoldMaxSecondsLeftToOpen,
-                minDirectionalBtcMarginBps: cfg.undervaluedHoldMinBtcMarginBps,
-                stopLossPct: cfg.undervaluedHoldStopLossPct,
-            },
+            params: undervaluedHoldParams(cfg),
         });
         if (position && decision.position) positions.set(row.slug, decision.position);
         const quote = decision.quotes[0];
@@ -1491,15 +1500,7 @@ function runUndervaluedFinalManagedBacktest(rows: MarketRow[], cfg: BacktestConf
             history,
             undervaluedPosition,
             undervaluedBlocked: Boolean(undervaluedPosition),
-            undervaluedParams: {
-                minEntryPrice: cfg.undervaluedHoldMinEntryPrice,
-                maxEntryPrice: cfg.undervaluedHoldMaxEntryPrice,
-                orderShares: cfg.undervaluedHoldOrderShares,
-                minSecondsLeftToOpen: Math.max(30, cfg.undervaluedHoldMinSecondsLeftToOpen),
-                maxSecondsLeftToOpen: cfg.undervaluedHoldMaxSecondsLeftToOpen,
-                minDirectionalBtcMarginBps: cfg.undervaluedHoldMinBtcMarginBps,
-                stopLossPct: cfg.undervaluedHoldStopLossPct,
-            },
+            undervaluedParams: { ...undervaluedHoldParams(cfg), minSecondsLeftToOpen: Math.max(30, cfg.undervaluedHoldMinSecondsLeftToOpen) },
             finalPosition,
             finalBlocked: finalBlocked.has(row.slug),
             finalParams: final30ManagedParams(cfg),
@@ -1545,6 +1546,24 @@ function runUndervaluedFinalManagedBacktest(rows: MarketRow[], cfg: BacktestConf
     const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
     console.log(`Undervalued-final-managed: undervalued entries=${undervaluedEntries}, stops=${undervaluedStops}; final entries=${finalEntries}, stops=${finalStops}`);
     return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
+function undervaluedHoldParams(cfg: BacktestConfig) {
+    return {
+        minEntryPrice: cfg.undervaluedHoldMinEntryPrice,
+        maxEntryPrice: cfg.undervaluedHoldMaxEntryPrice,
+        orderShares: cfg.undervaluedHoldOrderShares,
+        minSecondsLeftToOpen: cfg.undervaluedHoldMinSecondsLeftToOpen,
+        maxSecondsLeftToOpen: cfg.undervaluedHoldMaxSecondsLeftToOpen,
+        minDirectionalBtcMarginBps: cfg.undervaluedHoldMinBtcMarginBps,
+        minEdge: cfg.undervaluedHoldMinEdge,
+        volatilityLookbackSeconds: cfg.undervaluedHoldVolatilityLookbackSeconds,
+        volatilityMinSamples: cfg.undervaluedHoldVolatilityMinSamples,
+        minVolPerInterval: cfg.undervaluedHoldMinVolPerInterval,
+        maxVolPerInterval: cfg.undervaluedHoldMaxVolPerInterval,
+        maxSpread: cfg.undervaluedHoldMaxSpread,
+        stopLossPct: cfg.undervaluedHoldStopLossPct,
+    };
 }
 
 function final30ManagedParams(cfg: BacktestConfig) {
@@ -2676,9 +2695,9 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
     } else if (cfg.strategy === "final-30-managed") {
         console.log(`Params: ask>=${cfg.final30HighTriggerPrice} in final ${cfg.final30HighMaxSecondsLeftToOpen}s, earlyBtcMove=$${cfg.final30ManagedEarlyBtcMinMoveUsd}/ask>=${cfg.final30ManagedEarlyBtcMinAsk}/until=${cfg.final30ManagedEarlyBtcMaxSecondsLeft}s, direction=${cfg.final30ManagedBtcDirectionRequired}, BTC margin day=${cfg.final30ManagedDayMinDirectionalMarginBps}bps/night=${cfg.final30ManagedNightMinDirectionalMarginBps}bps (${cfg.final30ManagedDayStartHour}:00-${cfg.final30ManagedDayEndHour}:00 UTC${cfg.final30ManagedTimezoneOffsetHours >= 0 ? "+" : ""}${cfg.final30ManagedTimezoneOffsetHours}), gapSafety>=${cfg.final30ManagedTrendMinGapSafety}, peakRatio>=${cfg.final30ManagedTrendMinPeakGapRatio}, spread<=${cfg.final30ManagedTrendMaxSpread}, maxEntry=${cfg.final30HighMaxEntryPrice}, shares=${cfg.final30HighOrderShares}, takeProfitDelta=${cfg.final30ManagedTakeProfitDelta}, stopLossDelta=${cfg.final30ManagedStopLossDelta}, stopBtcReversal=${cfg.final30ManagedStopMinBtcReversalBps}bps, stopConfirm=${cfg.final30ManagedStopConfirmSeconds}s, stopMaxMargin=${cfg.final30ManagedStopMaxDirectionalMarginBps}bps`);
     } else if (cfg.strategy === "undervalued-hold") {
-        console.log(`Params: entry=(${cfg.undervaluedHoldMinEntryPrice},${cfg.undervaluedHoldMaxEntryPrice}), BTC margin>=${cfg.undervaluedHoldMinBtcMarginBps}bps, secondsLeft=${cfg.undervaluedHoldMinSecondsLeftToOpen}-${cfg.undervaluedHoldMaxSecondsLeftToOpen}, shares=${cfg.undervaluedHoldOrderShares}, stopLossPct=${cfg.undervaluedHoldStopLossPct}, takeProfit=off`);
+        console.log(`Params: entry=[${cfg.undervaluedHoldMinEntryPrice},${cfg.undervaluedHoldMaxEntryPrice}], edge>=${cfg.undervaluedHoldMinEdge}, realtimeVol=${cfg.undervaluedHoldVolatilityLookbackSeconds}s/${cfg.undervaluedHoldVolatilityMinSamples} samples clamp=${cfg.undervaluedHoldMinVolPerInterval}-${cfg.undervaluedHoldMaxVolPerInterval}, spread<=${cfg.undervaluedHoldMaxSpread}, BTC margin>=${cfg.undervaluedHoldMinBtcMarginBps}bps, secondsLeft=${cfg.undervaluedHoldMinSecondsLeftToOpen}-${cfg.undervaluedHoldMaxSecondsLeftToOpen}, shares=${cfg.undervaluedHoldOrderShares}, stopLossPct=${cfg.undervaluedHoldStopLossPct}, takeProfit=off`);
     } else if (cfg.strategy === "undervalued-final-managed") {
-        console.log(`Params: undervalued entry=(${cfg.undervaluedHoldMinEntryPrice},${cfg.undervaluedHoldMaxEntryPrice}), BTC margin>=${cfg.undervaluedHoldMinBtcMarginBps}bps, window=${Math.max(30, cfg.undervaluedHoldMinSecondsLeftToOpen)}-${cfg.undervaluedHoldMaxSecondsLeftToOpen}s, stopLossPct=${cfg.undervaluedHoldStopLossPct}; final window=${cfg.final30HighMinSecondsLeftToOpen}-${cfg.final30HighEarlyMaxSecondsLeftToOpen}s, trigger=${cfg.final30HighTriggerPrice}, shares=${cfg.final30HighOrderShares}`);
+        console.log(`Params: undervalued entry=[${cfg.undervaluedHoldMinEntryPrice},${cfg.undervaluedHoldMaxEntryPrice}], edge>=${cfg.undervaluedHoldMinEdge}, realtimeVol=${cfg.undervaluedHoldVolatilityLookbackSeconds}s/${cfg.undervaluedHoldVolatilityMinSamples} samples, spread<=${cfg.undervaluedHoldMaxSpread}, BTC margin>=${cfg.undervaluedHoldMinBtcMarginBps}bps, window=${Math.max(30, cfg.undervaluedHoldMinSecondsLeftToOpen)}-${cfg.undervaluedHoldMaxSecondsLeftToOpen}s, stopLossPct=${cfg.undervaluedHoldStopLossPct}; final window=${cfg.final30HighMinSecondsLeftToOpen}-${cfg.final30HighEarlyMaxSecondsLeftToOpen}s, trigger=${cfg.final30HighTriggerPrice}, shares=${cfg.final30HighOrderShares}`);
     } else if (cfg.strategy === "dynamic-range-pullback") {
         const params = cfg.dynamicRangePullbackParams;
         console.log(`Params: contractPullback>=${params.minContractPullback}, entry=currentAsk, syntheticSell=${params.syntheticSell}, dynamicSizing=${params.dynamicSizing}, minShares=${params.orderShares}, pairCap=${params.maxPairUsdc}, lockedProfit>=${params.minLockedProfit}, secondsLeft=${params.minSecondsLeftToOpen}-${params.maxSecondsLeftToOpen}, confirm=${params.entryConfirmSeconds}s, btcMargin>=${params.minDirectionalBtcMarginBps}bps, btcRetracement<=${params.maxBtcRetracementBps}bps, pairCosts=${params.earlyPairCost}/${params.middlePairCost}/${params.latePairCost}, stopDelta=${params.stopLossDelta}, maxNaked=${params.maxNakedSeconds}s`);

@@ -16,11 +16,15 @@ const finalParams: Btc5mFinal30ManagedParams = {
 const undervaluedParams = {
     minEntryPrice: 0.30, maxEntryPrice: 0.50, orderShares: 5,
     minSecondsLeftToOpen: 90, maxSecondsLeftToOpen: 300,
-    minDirectionalBtcMarginBps: 1, stopLossPct: 0.20,
+    minDirectionalBtcMarginBps: 1, minEdge: 0.12,
+    volatilityLookbackSeconds: 60, volatilityMinSamples: 20,
+    minVolPerInterval: 0.0005, maxVolPerInterval: 0.005,
+    maxSpread: 0.03, stopLossPct: 0.20,
 };
+const history = Array.from({ length: 21 }, (_, index) => ({ t: 80_000 + index * 1_000, btcPrice: 100_000, upAsk: 0.45, downAsk: 0.56 }));
 
 test("uses undervalued component before the final window", () => {
-    const decision = buildBtc5mUndervaluedFinalManagedOrders({ timestampMs: 100_000, endMs: 300_000, btcPrice: 100_020, openPrice: 100_000, upAsk: 0.45, downAsk: 0.56, upBid: 0.44, downBid: 0.55, undervaluedBlocked: false, undervaluedParams, finalBlocked: false, finalParams });
+    const decision = buildBtc5mUndervaluedFinalManagedOrders({ timestampMs: 100_000, endMs: 300_000, btcPrice: 100_020, openPrice: 100_000, upAsk: 0.45, downAsk: 0.56, upBid: 0.44, downBid: 0.55, history, undervaluedBlocked: false, undervaluedParams, finalBlocked: false, finalParams });
     assert.equal(decision.component, "undervalued");
     assert.equal(decision.quotes[0]?.leg, "UP");
 });
