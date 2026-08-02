@@ -15,6 +15,14 @@ export type Btc5mUndervaluedHoldParams = {
     minVolPerInterval: number;
     maxVolPerInterval: number;
     maxSpread: number;
+    stabilizationLookbackSeconds: number;
+    stabilizationMaxDrop: number;
+    stabilizationMinRecovery: number;
+    stabilizationStableSeconds: number;
+    stabilizationStableRange: number;
+    btcConfirmSeconds: number;
+    takeProfitMinDelta: number;
+    takeProfitMaxRemainingEdge: number;
     stopLossPct: number;
 };
 
@@ -71,6 +79,8 @@ export function buildBtc5mUndervaluedHoldOrders(input: Btc5mUndervaluedHoldInput
     if (input.params.maxSpread > 0 && spread > input.params.maxSpread) {
         return { quotes: [], reason: `undervalued-hold spread ${spread.toFixed(3)} above ${input.params.maxSpread.toFixed(3)}` };
     }
+    const stabilizationReason = entryStabilizationReason(input, leg, ask);
+    if (stabilizationReason) return { quotes: [], reason: stabilizationReason };
     const volPerInterval = calculateRealtimeVolPerInterval(input.history, input.timestampMs, input.params);
     if (volPerInterval === undefined) {
         return { quotes: [], reason: `undervalued-hold waiting for ${input.params.volatilityMinSamples} volatility samples` };
@@ -127,6 +137,25 @@ function buildExitDecision(input: Btc5mUndervaluedHoldInput): Btc5mUndervaluedHo
     if (position.exited) return { quotes: [], position, reason: "undervalued-hold exited" };
     const bid = position.leg === "UP" ? input.upBid : input.downBid;
     if (bid === undefined || bid <= 0) return { quotes: [], position, reason: "undervalued-hold holding; waiting for bid" };
+    const takeProfitPrice = position.entryPrice + input.params.takeProfitMinDelta;
+    const fair = fairValueForLeg(input, position.leg);
+    const remainingEdge = fair === undefined ? Number.POSITIVE_INFINITY : fair - bid;
+    if (input.params.takeProfitMinDelta > 0 && bid >= takeProfitPrice && remainingEdge <= input.params.takeProfitMaxRemainingEdge) {
+        return {
+            quotes: [{
+                key: `${position.leg}:SELL`,
+                leg: position.leg,
+                side: "SELL",
+                price: bid,
+                size: position.shares,
+                fair,
+                edge: remainingEdge,
+                note: `undervalued-hold convergence take-profit bid=${bid.toFixed(2)} fair=${fair?.toFixed(3)} remainingEdge=${remainingEdge.toFixed(3)}`,
+            }],
+            position,
+            reason: "undervalued-hold convergence take profit",
+        };
+    }
     if (input.params.stopLossPct <= 0) return { quotes: [], position, reason: "undervalued-hold holding to settlement; stop loss disabled" };
     const stopPrice = position.entryPrice * (1 - input.params.stopLossPct);
     if (bid > stopPrice) {
@@ -144,4 +173,50 @@ function buildExitDecision(input: Btc5mUndervaluedHoldInput): Btc5mUndervaluedHo
         position,
         reason: `undervalued-hold stop loss ${(input.params.stopLossPct * 100).toFixed(1)}%`,
     };
+}
+
+function entryStabilizationReason(input: Btc5mUndervaluedHoldInput, leg: Btc5mLeg, currentAsk: number): string | undefined {
+    const history = input.history ?? [];
+    if (input.params.btcConfirmSeconds > 0) {
+        const cutoff = input.timestampMs - input.params.btcConfirmSeconds * 1000;
+        const btcPoints = history.filter((point) => point.t >= cutoff && point.t <= input.timestampMs && point.btcPrice && point.btcPrice > 0);
+        if (btcPoints.length < 2 || btcPoints[0].t > cutoff + 1000) return `undervalued-hold waiting for ${input.params.btcConfirmSeconds}s BTC confirmation`;
+        const confirmed = btcPoints.every((point) => {
+            const moveBps = (point.btcPrice! / input.openPrice! - 1) * 10_000;
+            const directionalMargin = leg === "UP" ? moveBps : -moveBps;
+            return directionalMargin >= input.params.minDirectionalBtcMarginBps;
+        });
+        if (!confirmed) return `undervalued-hold BTC direction not confirmed for ${input.params.btcConfirmSeconds}s`;
+    }
+    if (input.params.stabilizationLookbackSeconds <= 0) return undefined;
+    const cutoff = input.timestampMs - input.params.stabilizationLookbackSeconds * 1000;
+    const askPoints = history
+        .filter((point) => point.t >= cutoff && point.t <= input.timestampMs)
+        .map((point) => ({ t: point.t, ask: leg === "UP" ? point.upAsk : point.downAsk }))
+        .filter((point): point is { t: number; ask: number } => point.ask !== undefined && point.ask > 0);
+    if (askPoints.length < 2 || askPoints[0].t > cutoff + 1000) return `undervalued-hold waiting for ${input.params.stabilizationLookbackSeconds}s contract history`;
+    const peakAsk = Math.max(...askPoints.map((point) => point.ask));
+    const troughAsk = Math.min(...askPoints.map((point) => point.ask));
+    const recentDrop = peakAsk - currentAsk;
+    if (recentDrop > input.params.stabilizationMaxDrop) {
+        return `undervalued-hold falling knife drop=${recentDrop.toFixed(3)} above ${input.params.stabilizationMaxDrop.toFixed(3)}`;
+    }
+    const recovered = currentAsk - troughAsk >= input.params.stabilizationMinRecovery;
+    const stableCutoff = input.timestampMs - input.params.stabilizationStableSeconds * 1000;
+    const stablePoints = askPoints.filter((point) => point.t >= stableCutoff);
+    const stableRange = stablePoints.length > 1 ? Math.max(...stablePoints.map((point) => point.ask)) - Math.min(...stablePoints.map((point) => point.ask)) : Number.POSITIVE_INFINITY;
+    const stable = input.params.stabilizationStableSeconds <= 0
+        || (stablePoints.length >= 2 && stablePoints[0].t <= stableCutoff + 1000 && stableRange <= input.params.stabilizationStableRange);
+    if (!recovered && !stable) {
+        return `undervalued-hold waiting for recovery/stability recovery=${(currentAsk - troughAsk).toFixed(3)} stableRange=${Number.isFinite(stableRange) ? stableRange.toFixed(3) : "n/a"}`;
+    }
+    return undefined;
+}
+
+function fairValueForLeg(input: Btc5mUndervaluedHoldInput, leg: Btc5mLeg): number | undefined {
+    if (!input.openPrice || !input.btcPrice) return undefined;
+    const volPerInterval = calculateRealtimeVolPerInterval(input.history, input.timestampMs, input.params);
+    if (volPerInterval === undefined) return undefined;
+    const fairUp = fairUpProbability(input.btcPrice, input.openPrice, input.endMs - input.timestampMs, { intervalMinutes: 5, volPerInterval });
+    return leg === "UP" ? fairUp : 1 - fairUp;
 }

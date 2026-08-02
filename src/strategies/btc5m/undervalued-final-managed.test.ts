@@ -19,7 +19,10 @@ const undervaluedParams = {
     minDirectionalBtcMarginBps: 1, minEdge: 0.12,
     volatilityLookbackSeconds: 60, volatilityMinSamples: 20,
     minVolPerInterval: 0.0005, maxVolPerInterval: 0.005,
-    maxSpread: 0.03, stopLossPct: 0.20,
+    maxSpread: 0.03,
+    stabilizationLookbackSeconds: 0, stabilizationMaxDrop: 0.05, stabilizationMinRecovery: 0.02,
+    stabilizationStableSeconds: 3, stabilizationStableRange: 0.02, btcConfirmSeconds: 0,
+    takeProfitMinDelta: 0.05, takeProfitMaxRemainingEdge: 0.03, stopLossPct: 0.20,
 };
 const history = Array.from({ length: 21 }, (_, index) => ({ t: 80_000 + index * 1_000, btcPrice: 100_000, upAsk: 0.45, downAsk: 0.56 }));
 
