@@ -28,6 +28,7 @@
     "test:final-30-managed": "tsx --test src/strategies/btc5m/final-30-managed.test.ts",
     "test:undervalued-hold": "tsx --test src/strategies/btc5m/undervalued-hold.test.ts",
     "test:undervalued-final-managed": "tsx --test src/strategies/btc5m/undervalued-final-managed.test.ts",
+    "test:polymarket-chainlink-price": "tsx --test src/providers/polymarketChainlinkBtcPriceProvider.test.ts",
     "test:conditional-market-maker": "tsx --test src/strategies/btc5m/conditional-market-maker.test.ts",
     "test:range-mid-reversion": "tsx --test src/strategies/btc5m/range-mid-reversion.test.ts",
     "test:conditional-rebound": "tsx --test src/strategies/btc5m/conditional-rebound.test.ts",

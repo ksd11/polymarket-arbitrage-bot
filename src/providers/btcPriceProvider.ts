@@ -22,6 +22,14 @@ export type BtcPriceSnapshot = {
     source: string;
 };
 
+export interface BtcPriceSource {
+    start(): Promise<void>;
+    stop(): void;
+    getPrice(): number | null;
+    getSnapshot(): BtcPriceSnapshot | null;
+    getPriceNear?(timestampMs: number, toleranceMs: number): BtcPriceSnapshot | null;
+}
+
 const DEFAULT_URLS = [
     "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
     "https://api.exchange.coinbase.com/products/BTC-USD/ticker",
@@ -37,7 +45,7 @@ export function defaultBtcPriceConfig(): BtcPriceProviderConfig {
     };
 }
 
-export class BtcPriceProvider {
+export class BtcPriceProvider implements BtcPriceSource {
     private latest: BtcPriceSnapshot | null = null;
     private timer: NodeJS.Timeout | null = null;
     private stopped = false;

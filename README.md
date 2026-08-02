@@ -344,6 +344,8 @@ npm run backtest:btc5m -- --strategy btc5m:undervalued-hold --csv data/btc5m-his
 
 Dry-run it live while retaining both trajectory and console logs:
 
+Live `undervalued-hold` uses Polymarket RTDS Chainlink `btc/usd` by default, so its current and cycle-open BTC prices use the same reference family as Polymarket. When started mid-cycle without a Chainlink observation near the cycle boundary, it waits for the next cycle instead of substituting an exchange price. Set `UNDERVALUED_HOLD_BTC_PRICE_SOURCE=rest` only to restore the legacy exchange REST fallback.
+
 ```bash
 RUN_ID=$(date +%Y%m%d-%H%M%S)
 UNDERVALUED_HOLD_DRY_RUN=true \
@@ -353,6 +355,8 @@ npm run btc5m:undervalued-hold
 ```
 
 Combine it with `final-30-managed`. The undervaluation component never opens during the final 30 seconds; the final component may enter only when there is no active undervaluation position or order:
+
+The combined live runner also defaults to Polymarket Chainlink RTDS; override it with `UNDERVALUED_FINAL_MANAGED_BTC_PRICE_SOURCE=rest` if required.
 
 ```bash
 npm run backtest:btc5m -- --strategy btc5m:undervalued-final-managed --csv data/btc5m-history-3days.csv

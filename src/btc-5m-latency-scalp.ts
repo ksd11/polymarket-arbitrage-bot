@@ -6,7 +6,8 @@ import { dirname, resolve } from "path";
 import { ClobClient, CreateOrderOptions, OrderType, Side, UserOrderV2 as UserOrder } from "@polymarket/clob-client-v2";
 import { config } from "./config";
 import { getClobClient } from "./providers/clobclient";
-import { BtcPriceProvider, defaultBtcPriceConfig } from "./providers/btcPriceProvider";
+import { BtcPriceProvider, BtcPriceSource, defaultBtcPriceConfig } from "./providers/btcPriceProvider";
+import { PolymarketChainlinkBtcPriceProvider, defaultPolymarketChainlinkBtcPriceConfig } from "./providers/polymarketChainlinkBtcPriceProvider";
 import { MarketResolvedPayload, WebSocketOrderBook } from "./providers/websocketOrderbook";
 import { approveUSDCAllowance, updateClobBalanceAllowance } from "./security/allowance";
 import { createCredential } from "./security/createCredential";
@@ -46,6 +47,11 @@ type RunnerConfig = {
     btcPriceRefreshMs: number;
     btcPriceMaxStaleMs: number;
     btcPriceUrls: string[];
+    btcPriceSource: "rest" | "polymarket-chainlink";
+    btcChainlinkWsUrl: string;
+    btcChainlinkSymbol: string;
+    btcChainlinkConnectTimeoutMs: number;
+    btcOpenPriceToleranceMs: number;
     recordEnabled: boolean;
     recordPath: string;
     params: Btc5mLatencyScalpParams;
@@ -101,7 +107,7 @@ type Accounting = {
 
 const HEADERS = [
     "row_type", "timestamp", "timestamp_ms", "slug", "condition_id", "dry_run",
-    "btc_price", "open_price", "seconds_left", "up_bid", "up_ask", "down_bid", "down_ask",
+    "btc_price", "btc_source", "open_price", "seconds_left", "up_bid", "up_ask", "down_bid", "down_ask",
     "candidate_leg", "triggered_leg", "state_filled", "state_cancelled", "state_exited", "decision_reason", "quotes",
     "strategy_component", "dynamic_entry_leg", "dynamic_entry_shares", "dynamic_synthetic_sell", "dynamic_planned_exit_price", "dynamic_planned_hedge_price", "dynamic_planned_hedge_shares", "dynamic_planned_locked_profit", "dynamic_paired", "dynamic_exited", "final_blocked",
     "event_role", "event_leg", "event_side", "event_price", "event_size", "event_cost", "event_notional", "execution_source", "execution_ids", "order_id", "order_status", "filled_size", "event_error",
@@ -136,6 +142,7 @@ function loadConfig(): RunnerConfig {
     const undervaluedHold = mode === "undervalued-hold";
     const undervaluedFinalManaged = mode === "undervalued-final-managed";
     const dynamicRangeFinalManaged = mode === "dynamic-range-final-managed";
+    const chainlinkDefault = undervaluedHold || undervaluedFinalManaged;
     const prefix = deep ? "DEEP_REBOUND" : final30High ? "FINAL_30_HIGH" : final30Managed ? "FINAL_30_MANAGED" : undervaluedHold ? "UNDERVALUED_HOLD" : undervaluedFinalManaged ? "UNDERVALUED_FINAL_MANAGED" : dynamicRangeFinalManaged ? "DYNAMIC_RANGE_FINAL_MANAGED" : "LATENCY_SCALP";
     const cfg: RunnerConfig = {
         mode,
@@ -147,6 +154,11 @@ function loadConfig(): RunnerConfig {
         orderReconcileGraceMs: envNumber(`${prefix}_ORDER_RECONCILE_GRACE_MS`, 5_000),
         recordIntervalMs: envNumber(`${prefix}_RECORD_INTERVAL_MS`, 1000), btcPriceRefreshMs: envNumber(`${prefix}_BTC_PRICE_REFRESH_MS`, Math.min(250, btc.refreshIntervalMs)),
         btcPriceMaxStaleMs: envNumber(`${prefix}_BTC_PRICE_MAX_STALE_MS`, btc.maxStalenessMs), btcPriceUrls: parseList(envString(`${prefix}_BTC_PRICE_URLS`, btc.urls.join("|"))),
+        btcPriceSource: envString(`${prefix}_BTC_PRICE_SOURCE`, chainlinkDefault ? "polymarket-chainlink" : "rest").toLowerCase() as RunnerConfig["btcPriceSource"],
+        btcChainlinkWsUrl: envString(`${prefix}_CHAINLINK_WS_URL`, defaultPolymarketChainlinkBtcPriceConfig().url),
+        btcChainlinkSymbol: envString(`${prefix}_CHAINLINK_SYMBOL`, "btc/usd").toLowerCase(),
+        btcChainlinkConnectTimeoutMs: envNumber(`${prefix}_CHAINLINK_CONNECT_TIMEOUT_MS`, 15_000),
+        btcOpenPriceToleranceMs: envNumber(`${prefix}_BTC_OPEN_PRICE_TOLERANCE_MS`, 5_000),
         recordEnabled: envBool(`${prefix}_RECORD_ENABLED`, true), recordPath: resolve(envString(`${prefix}_RECORD_FILE`, `data/btc5m-${mode}-live.csv`)),
         params: {
             minSignalPrice: envNumber("LATENCY_SCALP_MIN_SIGNAL_PRICE", 0.72),
@@ -266,6 +278,7 @@ function loadConfig(): RunnerConfig {
     const dynamic = cfg.dynamicRangePullbackParams;
     if (dynamicRangeFinalManaged && (!(dynamic.minContractPullback > 0 && dynamic.minContractPullback < 1) || dynamic.minOrderNotional <= 0 || dynamic.orderShares <= 0 || dynamic.maxPairUsdc < dynamic.minOrderNotional * 2 || dynamic.minLockedProfit < 0 || dynamic.shareStep <= 0 || dynamic.maxSecondsLeftToOpen <= dynamic.minSecondsLeftToOpen || dynamic.maxSpread <= 0 || dynamic.entryConfirmSeconds < 0 || !(dynamic.earlyPairCost > 0 && dynamic.earlyPairCost <= dynamic.middlePairCost && dynamic.middlePairCost <= dynamic.latePairCost && dynamic.latePairCost < 1) || dynamic.stopLossDelta <= 0 || dynamic.stopConfirmSeconds < 0 || dynamic.maxNakedSeconds < 0)) throw new Error("Invalid DYNAMIC_RANGE_PULLBACK configuration");
     if ((deep ? cfg.deepParams.orderUsdc : cfg.params.orderUsdc) <= 0 || cfg.evaluationIntervalMs < 50 || cfg.orderPollIntervalMs < 100 || cfg.orderRetryIntervalMs < 250 || cfg.entryMaxAgeSeconds <= 0) throw new Error("Invalid scalp budget or intervals");
+    if (!(["rest", "polymarket-chainlink"] as string[]).includes(cfg.btcPriceSource) || cfg.btcChainlinkConnectTimeoutMs <= 0 || cfg.btcOpenPriceToleranceMs <= 0) throw new Error("Invalid BTC price source configuration");
     return cfg;
 }
 
@@ -289,7 +302,7 @@ async function fetchTokens(cycle: { slug: string; startMs: number; endMs: number
 
 class LatencyScalpBot {
     private ws: WebSocketOrderBook | null = null;
-    private btc: BtcPriceProvider;
+    private btc: BtcPriceSource;
     private tokens: Tokens | null = null;
     private state: Btc5mLatencyScalpState = {};
     private dynamicState: Btc5mDynamicRangePullbackState = {};
@@ -311,11 +324,20 @@ class LatencyScalpBot {
     private stopped = false;
     private lastRecordAt = 0;
     private lastMarketLogAt = 0;
+    private lastOpenPriceWarningAt = 0;
     private nextOrderAttemptAt = 0;
     private executionVersion = 0;
 
     constructor(private client: ClobClient, private cfg: RunnerConfig) {
-        this.btc = new BtcPriceProvider({ urls: cfg.btcPriceUrls, refreshIntervalMs: cfg.btcPriceRefreshMs, maxStalenessMs: cfg.btcPriceMaxStaleMs });
+        this.btc = cfg.btcPriceSource === "polymarket-chainlink"
+            ? new PolymarketChainlinkBtcPriceProvider({
+                ...defaultPolymarketChainlinkBtcPriceConfig(),
+                url: cfg.btcChainlinkWsUrl,
+                symbol: cfg.btcChainlinkSymbol,
+                maxStalenessMs: cfg.btcPriceMaxStaleMs,
+                connectTimeoutMs: cfg.btcChainlinkConnectTimeoutMs,
+            })
+            : new BtcPriceProvider({ urls: cfg.btcPriceUrls, refreshIntervalMs: cfg.btcPriceRefreshMs, maxStalenessMs: cfg.btcPriceMaxStaleMs });
     }
 
     async start(): Promise<void> {
@@ -334,6 +356,7 @@ class LatencyScalpBot {
                     ? `dynamicPullback>=${this.cfg.dynamicRangePullbackParams.minContractPullback}, syntheticSell=${this.cfg.dynamicRangePullbackParams.syntheticSell}, dynamicSizing=${this.cfg.dynamicRangePullbackParams.dynamicSizing}, dynamicPairCap=${this.cfg.dynamicRangePullbackParams.maxPairUsdc}, dynamicLockedProfit>=${this.cfg.dynamicRangePullbackParams.minLockedProfit}, finalTrigger=${this.cfg.final30ManagedParams.triggerPrice}, finalShares=${this.cfg.final30ManagedParams.orderShares}`
                 : `signal=${p.minSignalPrice}-${p.entryPrice}, momentum=${p.minContractMomentum}, entry=${p.entryPrice}, takeProfit=${p.takeProfitPrice}`;
         logger.info(`Starting ${this.cfg.mode}: ${description}, dryRun=${this.cfg.dryRun}`);
+        logger.info(`BTC price source: ${this.cfg.btcPriceSource}${this.cfg.btcPriceSource === "polymarket-chainlink" ? ` (${this.cfg.btcChainlinkSymbol})` : ""}`);
         logger.info(`Trajectory CSV: ${this.cfg.recordPath}`);
         await this.btc.start();
         this.ws = new WebSocketOrderBook("market", [], null, -1);
@@ -368,7 +391,7 @@ class LatencyScalpBot {
 
     private resetCycle(): void {
         this.tokens = null; this.state = {}; this.dynamicState = {}; this.managedPosition = undefined; this.undervaluedPosition = undefined; this.finalBlocked = false; this.history = []; this.btcOpenPrice = undefined; this.lastBtcPrice = undefined;
-        this.entryOrder = null; this.exitOrder = null; this.accounting = null; this.lastRecordAt = 0; this.lastMarketLogAt = 0;
+        this.entryOrder = null; this.exitOrder = null; this.accounting = null; this.lastRecordAt = 0; this.lastMarketLogAt = 0; this.lastOpenPriceWarningAt = 0;
     }
 
     private async initializeCycle(): Promise<void> {
@@ -381,6 +404,7 @@ class LatencyScalpBot {
             this.ws.subscribeToTokenIds([tokens.upTokenId, tokens.downTokenId]);
             this.ws.setTokenLabel(tokens.upTokenId, "Up"); this.ws.setTokenLabel(tokens.downTokenId, "Down"); this.ws.setTokenPair(tokens.upTokenId, tokens.downTokenId);
             this.ws.onPriceUpdate(tokens.upTokenId, () => undefined); this.ws.onPriceUpdate(tokens.downTokenId, () => undefined);
+            this.updateOpenPrice(Date.now(), this.btc.getPrice() ?? undefined);
             logger.info(`Cycle ready: ${tokens.slug}`);
         } catch (error) { logger.error(`Failed to initialize latency-scalp cycle: ${error instanceof Error ? error.message : String(error)}`); }
     }
@@ -393,11 +417,13 @@ class LatencyScalpBot {
             const up = this.ws.getPrice(this.tokens.upTokenId); const down = this.ws.getPrice(this.tokens.downTokenId);
             if (!up?.bestAsk || !down?.bestAsk) return;
             const btcPrice = this.btc.getPrice() ?? undefined; this.lastBtcPrice = btcPrice;
-            if (btcPrice !== undefined && this.btcOpenPrice === undefined) this.btcOpenPrice = btcPrice;
+            const btcSnapshot = btcPrice === undefined ? null : this.btc.getSnapshot();
+            this.updateOpenPrice(now, btcPrice);
             this.logMarketSnapshot(now, secondsLeft, up.bestAsk, down.bestAsk, btcPrice);
             await this.fillDryOrders(now, up.bestAsk, down.bestAsk, up.bestBid ?? undefined, down.bestBid ?? undefined);
-            if (btcPrice !== undefined && (this.history.length === 0 || now - this.history[this.history.length - 1].t >= 250)) {
-                this.history.push({ t: now, upAsk: up.bestAsk, downAsk: down.bestAsk, btcPrice });
+            const btcTimestamp = btcSnapshot?.updatedAt ?? now;
+            if (btcPrice !== undefined && (this.history.length === 0 || btcTimestamp > this.history[this.history.length - 1].t)) {
+                this.history.push({ t: btcTimestamp, upAsk: up.bestAsk, downAsk: down.bestAsk, btcPrice });
                 const cutoff = now - this.cfg.intervalMinutes * 60_000; while (this.history.length > 0 && this.history[0].t < cutoff) this.history.shift();
             }
             if (this.cfg.mode === "final-30-managed" && this.active(this.entryOrder)) {
@@ -522,18 +548,42 @@ class LatencyScalpBot {
 
     private active(order: TrackedOrder | null): boolean { return Boolean(order && !isFinal(order.status)); }
 
+    private updateOpenPrice(now: number, currentPrice?: number): void {
+        if (this.btcOpenPrice !== undefined || !this.tokens) return;
+        const boundarySnapshot = this.btc.getPriceNear?.(this.tokens.startMs, this.cfg.btcOpenPriceToleranceMs) ?? null;
+        if (boundarySnapshot) {
+            this.btcOpenPrice = boundarySnapshot.price;
+            logger.info(`BTC open price: $${boundarySnapshot.price.toFixed(2)} from ${boundarySnapshot.source}, offset=${boundarySnapshot.updatedAt - this.tokens.startMs}ms`);
+            return;
+        }
+        if (this.cfg.btcPriceSource === "rest" && currentPrice !== undefined) {
+            this.btcOpenPrice = currentPrice;
+            logger.warning(`BTC open price fallback: $${currentPrice.toFixed(2)} from current REST quote`);
+            return;
+        }
+        if (now - this.lastOpenPriceWarningAt >= 30_000) {
+            this.lastOpenPriceWarningAt = now;
+            logger.warning(`Waiting for Chainlink BTC tick within ±${this.cfg.btcOpenPriceToleranceMs}ms of cycle start; this cycle will not trade without a valid open price`);
+        }
+    }
+
     private logMarketSnapshot(now: number, secondsLeft: number, upAsk: number, downAsk: number, btcPrice?: number): void {
         if (this.cfg.marketLogIntervalMs > 0 && now - this.lastMarketLogAt < this.cfg.marketLogIntervalMs) return;
         this.lastMarketLogAt = now;
-        if (btcPrice === undefined || this.btcOpenPrice === undefined) {
+        const source = this.btc.getSnapshot()?.source ?? this.cfg.btcPriceSource;
+        if (btcPrice === undefined) {
             logger.info(`📊 Up Ask: ${upAsk.toFixed(4)} | Down Ask: ${downAsk.toFixed(4)} | BTC: -- | Open: -- | Left: ${secondsLeft.toFixed(1)}s`);
+            return;
+        }
+        if (this.btcOpenPrice === undefined) {
+            logger.info(`📊 Up Ask: ${upAsk.toFixed(4)} | Down Ask: ${downAsk.toFixed(4)} | BTC: $${btcPrice.toFixed(2)} [${source}] | Open: -- | Left: ${secondsLeft.toFixed(1)}s`);
             return;
         }
         const offsetUsd = btcPrice - this.btcOpenPrice;
         const offsetBps = this.btcOpenPrice > 0 ? offsetUsd / this.btcOpenPrice * 10_000 : 0;
         const signedUsd = `${offsetUsd >= 0 ? "+" : "-"}$${Math.abs(offsetUsd).toFixed(2)}`;
         const signedBps = `${offsetBps >= 0 ? "+" : ""}${offsetBps.toFixed(2)}bps`;
-        logger.info(`📊 Up Ask: ${upAsk.toFixed(4)} | Down Ask: ${downAsk.toFixed(4)} | BTC: $${btcPrice.toFixed(2)} | Open: $${this.btcOpenPrice.toFixed(2)} | Δ: ${signedUsd} (${signedBps}) | Left: ${secondsLeft.toFixed(1)}s`);
+        logger.info(`📊 Up Ask: ${upAsk.toFixed(4)} | Down Ask: ${downAsk.toFixed(4)} | BTC: $${btcPrice.toFixed(2)} [${source}] | Open: $${this.btcOpenPrice.toFixed(2)} | Δ: ${signedUsd} (${signedBps}) | Left: ${secondsLeft.toFixed(1)}s`);
     }
 
     private pendingReconciliation(side: "BUY" | "SELL"): boolean {
@@ -804,7 +854,7 @@ class LatencyScalpBot {
 
     private recordDecision(now: number, secondsLeft: number, up: any, down: any, btcPrice: number | undefined, reason: string | undefined, quotes: any[], component?: string): void {
         if (now - this.lastRecordAt < this.cfg.recordIntervalMs) return; this.lastRecordAt = now;
-        this.write({ row_type: "decision", timestamp: new Date(now).toISOString(), timestamp_ms: now, slug: this.tokens?.slug, condition_id: this.tokens?.conditionId, dry_run: this.cfg.dryRun, btc_price: optional(btcPrice, 2), open_price: optional(this.btcOpenPrice, 2), seconds_left: secondsLeft.toFixed(3), up_bid: optional(up.bestBid), up_ask: optional(up.bestAsk), down_bid: optional(down.bestBid), down_ask: optional(down.bestAsk), candidate_leg: this.state.candidateLeg, triggered_leg: this.state.triggeredLeg, state_filled: Boolean(this.state.filled), state_cancelled: Boolean(this.state.cancelled), state_exited: Boolean(this.state.exited), decision_reason: reason, quotes: quotes.map((quote) => `${quote.side} ${quote.leg}@${quote.price.toFixed(2)}x${quote.size.toFixed(4)}`).join("|"), strategy_component: component, dynamic_entry_leg: this.dynamicState.entryLeg, dynamic_entry_shares: optional(this.dynamicState.entryShares, 4), dynamic_synthetic_sell: Boolean(this.dynamicState.syntheticSell), dynamic_planned_exit_price: optional(this.dynamicState.plannedExitPrice, 2), dynamic_planned_hedge_price: optional(this.dynamicState.plannedHedgePrice, 2), dynamic_planned_hedge_shares: optional(this.dynamicState.plannedHedgeShares, 4), dynamic_planned_locked_profit: optional(this.dynamicState.plannedLockedProfit, 4), dynamic_paired: Boolean(this.dynamicState.paired), dynamic_exited: Boolean(this.dynamicState.exited), final_blocked: this.finalBlocked });
+        this.write({ row_type: "decision", timestamp: new Date(now).toISOString(), timestamp_ms: now, slug: this.tokens?.slug, condition_id: this.tokens?.conditionId, dry_run: this.cfg.dryRun, btc_price: optional(btcPrice, 2), btc_source: this.btc.getSnapshot()?.source ?? this.cfg.btcPriceSource, open_price: optional(this.btcOpenPrice, 2), seconds_left: secondsLeft.toFixed(3), up_bid: optional(up.bestBid), up_ask: optional(up.bestAsk), down_bid: optional(down.bestBid), down_ask: optional(down.bestAsk), candidate_leg: this.state.candidateLeg, triggered_leg: this.state.triggeredLeg, state_filled: Boolean(this.state.filled), state_cancelled: Boolean(this.state.cancelled), state_exited: Boolean(this.state.exited), decision_reason: reason, quotes: quotes.map((quote) => `${quote.side} ${quote.leg}@${quote.price.toFixed(2)}x${quote.size.toFixed(4)}`).join("|"), strategy_component: component, dynamic_entry_leg: this.dynamicState.entryLeg, dynamic_entry_shares: optional(this.dynamicState.entryShares, 4), dynamic_synthetic_sell: Boolean(this.dynamicState.syntheticSell), dynamic_planned_exit_price: optional(this.dynamicState.plannedExitPrice, 2), dynamic_planned_hedge_price: optional(this.dynamicState.plannedHedgePrice, 2), dynamic_planned_hedge_shares: optional(this.dynamicState.plannedHedgeShares, 4), dynamic_planned_locked_profit: optional(this.dynamicState.plannedLockedProfit, 4), dynamic_paired: Boolean(this.dynamicState.paired), dynamic_exited: Boolean(this.dynamicState.exited), final_blocked: this.finalBlocked });
     }
 
     private recordOrder(rowType: string, order: TrackedOrder, executionPrice = order.price, eventNotional?: number, executionSource?: string, executionIds = order.executionIds, eventError?: string): void {
