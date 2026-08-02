@@ -304,6 +304,7 @@ class LatencyScalpBot {
     private switching = false;
     private stopped = false;
     private lastRecordAt = 0;
+    private lastMarketLogAt = 0;
     private nextOrderAttemptAt = 0;
     private executionVersion = 0;
 
@@ -329,7 +330,7 @@ class LatencyScalpBot {
         logger.info(`Starting ${this.cfg.mode}: ${description}, dryRun=${this.cfg.dryRun}`);
         logger.info(`Trajectory CSV: ${this.cfg.recordPath}`);
         await this.btc.start();
-        this.ws = new WebSocketOrderBook("market", [], null, this.cfg.marketLogIntervalMs);
+        this.ws = new WebSocketOrderBook("market", [], null, -1);
         await this.ws.connect();
         this.ws.onMarketResolved((payload) => void this.handleResolution(payload));
         await this.initializeCycle();
@@ -361,7 +362,7 @@ class LatencyScalpBot {
 
     private resetCycle(): void {
         this.tokens = null; this.state = {}; this.dynamicState = {}; this.managedPosition = undefined; this.undervaluedPosition = undefined; this.finalBlocked = false; this.history = []; this.btcOpenPrice = undefined; this.lastBtcPrice = undefined;
-        this.entryOrder = null; this.exitOrder = null; this.accounting = null; this.lastRecordAt = 0;
+        this.entryOrder = null; this.exitOrder = null; this.accounting = null; this.lastRecordAt = 0; this.lastMarketLogAt = 0;
     }
 
     private async initializeCycle(): Promise<void> {
@@ -387,6 +388,7 @@ class LatencyScalpBot {
             if (!up?.bestAsk || !down?.bestAsk) return;
             const btcPrice = this.btc.getPrice() ?? undefined; this.lastBtcPrice = btcPrice;
             if (btcPrice !== undefined && this.btcOpenPrice === undefined) this.btcOpenPrice = btcPrice;
+            this.logMarketSnapshot(now, secondsLeft, up.bestAsk, down.bestAsk, btcPrice);
             await this.fillDryOrders(now, up.bestAsk, down.bestAsk, up.bestBid ?? undefined, down.bestBid ?? undefined);
             if (btcPrice !== undefined && (this.history.length === 0 || now - this.history[this.history.length - 1].t >= 250)) {
                 this.history.push({ t: now, upAsk: up.bestAsk, downAsk: down.bestAsk, btcPrice });
@@ -512,6 +514,20 @@ class LatencyScalpBot {
     }
 
     private active(order: TrackedOrder | null): boolean { return Boolean(order && !isFinal(order.status)); }
+
+    private logMarketSnapshot(now: number, secondsLeft: number, upAsk: number, downAsk: number, btcPrice?: number): void {
+        if (this.cfg.marketLogIntervalMs > 0 && now - this.lastMarketLogAt < this.cfg.marketLogIntervalMs) return;
+        this.lastMarketLogAt = now;
+        if (btcPrice === undefined || this.btcOpenPrice === undefined) {
+            logger.info(`📊 Up Ask: ${upAsk.toFixed(4)} | Down Ask: ${downAsk.toFixed(4)} | BTC: -- | Open: -- | Left: ${secondsLeft.toFixed(1)}s`);
+            return;
+        }
+        const offsetUsd = btcPrice - this.btcOpenPrice;
+        const offsetBps = this.btcOpenPrice > 0 ? offsetUsd / this.btcOpenPrice * 10_000 : 0;
+        const signedUsd = `${offsetUsd >= 0 ? "+" : "-"}$${Math.abs(offsetUsd).toFixed(2)}`;
+        const signedBps = `${offsetBps >= 0 ? "+" : ""}${offsetBps.toFixed(2)}bps`;
+        logger.info(`📊 Up Ask: ${upAsk.toFixed(4)} | Down Ask: ${downAsk.toFixed(4)} | BTC: $${btcPrice.toFixed(2)} | Open: $${this.btcOpenPrice.toFixed(2)} | Δ: ${signedUsd} (${signedBps}) | Left: ${secondsLeft.toFixed(1)}s`);
+    }
 
     private pendingReconciliation(side: "BUY" | "SELL"): boolean {
         const now = Date.now();

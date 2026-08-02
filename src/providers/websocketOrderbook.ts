@@ -426,6 +426,7 @@ export class WebSocketOrderBook {
     }
 
     private shouldLogPrice(key: string): boolean {
+        if (this.priceLogIntervalMs < 0) return false;
         if (this.priceLogIntervalMs <= 0) return true;
         const now = Date.now();
         const lastLoggedAt = this.priceLogTimestamps.get(key) ?? 0;
