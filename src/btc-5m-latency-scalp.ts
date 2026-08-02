@@ -138,7 +138,7 @@ function loadConfig(): RunnerConfig {
         intervalMinutes: envNumber(`${prefix}_INTERVAL_MINUTES`, 5), tickSize: envString(`${prefix}_TICK_SIZE`, "0.01") as CreateOrderOptions["tickSize"],
         negRisk: envBool(`${prefix}_NEG_RISK`, config.copytrade.negRisk), evaluationIntervalMs: envNumber(`${prefix}_EVALUATION_INTERVAL_MS`, deep ? 250 : 100),
         orderPollIntervalMs: envNumber(`${prefix}_ORDER_POLL_INTERVAL_MS`, deep ? 500 : 250), marketLogIntervalMs: envNumber(`${prefix}_MARKET_LOG_INTERVAL_MS`, 1000),
-        orderRetryIntervalMs: envNumber(`${prefix}_ORDER_RETRY_INTERVAL_MS`, 1_000), entryMaxAgeSeconds: envNumber(`${prefix}_ENTRY_MAX_AGE_SECONDS`, 2),
+        orderRetryIntervalMs: envNumber(`${prefix}_ORDER_RETRY_INTERVAL_MS`, 1_000), entryMaxAgeSeconds: envNumber(`${prefix}_ENTRY_MAX_AGE_SECONDS`, final30Managed ? 12 : 2),
         orderReconcileGraceMs: envNumber(`${prefix}_ORDER_RECONCILE_GRACE_MS`, 5_000),
         recordIntervalMs: envNumber(`${prefix}_RECORD_INTERVAL_MS`, 1000), btcPriceRefreshMs: envNumber(`${prefix}_BTC_PRICE_REFRESH_MS`, Math.min(250, btc.refreshIntervalMs)),
         btcPriceMaxStaleMs: envNumber(`${prefix}_BTC_PRICE_MAX_STALE_MS`, btc.maxStalenessMs), btcPriceUrls: parseList(envString(`${prefix}_BTC_PRICE_URLS`, btc.urls.join("|"))),
@@ -192,7 +192,7 @@ function loadConfig(): RunnerConfig {
             orderShares: envNumber("FINAL_30_MANAGED_ORDER_SHARES", 5),
             maxSecondsLeftToOpen: envNumber("FINAL_30_MANAGED_MAX_SECONDS_LEFT_TO_OPEN", envNumber("FINAL_30_HIGH_MAX_SECONDS_LEFT_TO_OPEN", 30)),
             earlyMaxSecondsLeftToOpen: envNumber("FINAL_30_MANAGED_EARLY_MAX_SECONDS_LEFT_TO_OPEN", envNumber("FINAL_30_HIGH_EARLY_MAX_SECONDS_LEFT_TO_OPEN", 30)),
-            minSecondsLeftToOpen: envNumber("FINAL_30_MANAGED_MIN_SECONDS_LEFT_TO_OPEN", envNumber("FINAL_30_HIGH_MIN_SECONDS_LEFT_TO_OPEN", 0)),
+            minSecondsLeftToOpen: envNumber("FINAL_30_MANAGED_MIN_SECONDS_LEFT_TO_OPEN", 8),
             earlyBtcMinMoveUsd: envNumber("FINAL_30_MANAGED_EARLY_BTC_MIN_MOVE_USD", 0),
             earlyBtcMinAsk: envNumber("FINAL_30_MANAGED_EARLY_BTC_MIN_ASK", 0.85),
             earlyBtcMaxSecondsLeftToOpen: envNumber("FINAL_30_MANAGED_EARLY_BTC_MAX_SECONDS_LEFT", 90),
@@ -378,11 +378,14 @@ class LatencyScalpBot {
                 const ageSeconds = (now - this.entryOrder!.placedAtMs) / 1000;
                 const stale = ageSeconds >= this.cfg.entryMaxAgeSeconds;
                 const invalidMargin = marginBps < session.minDirectionalMarginBps;
-                if (stale || invalidMargin) {
+                const tooLate = secondsLeft <= this.cfg.final30ManagedParams.minSecondsLeftToOpen;
+                if (stale || invalidMargin || tooLate) {
                     const executionVersion = this.executionVersion;
-                    const reason = stale
-                        ? `entry refresh after ${ageSeconds.toFixed(1)}s`
-                        : `${session.name} BTC margin ${marginBps.toFixed(2)}bps below ${session.minDirectionalMarginBps.toFixed(2)}bps`;
+                    const reason = tooLate
+                        ? `only ${secondsLeft.toFixed(1)}s left; minimum is ${this.cfg.final30ManagedParams.minSecondsLeftToOpen}s`
+                        : invalidMargin
+                            ? `${session.name} BTC margin ${marginBps.toFixed(2)}bps below ${session.minDirectionalMarginBps.toFixed(2)}bps`
+                            : `entry refresh after ${ageSeconds.toFixed(1)}s`;
                     await this.cancelOrder(this.entryOrder, reason);
                     logger.info(`Revalidating final entry: ${reason}`);
                     if (this.executionVersion !== executionVersion) {

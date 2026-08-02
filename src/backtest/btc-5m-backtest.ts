@@ -594,7 +594,7 @@ function loadConfig(): BacktestConfig {
         final30HighOrderShares: Number(getArgValue("--final-30-high-shares") ?? envNumber(finalManaged ? "FINAL_30_MANAGED_ORDER_SHARES" : "FINAL_30_HIGH_ORDER_SHARES", finalManaged ? 5 : 2)),
         final30HighMaxSecondsLeftToOpen: Number(getArgValue("--final-30-high-max-seconds-left") ?? envNumber(finalManaged ? "FINAL_30_MANAGED_MAX_SECONDS_LEFT_TO_OPEN" : "FINAL_30_HIGH_MAX_SECONDS_LEFT_TO_OPEN", 30)),
         final30HighEarlyMaxSecondsLeftToOpen: Number(getArgValue("--final-30-high-early-max-seconds-left") ?? envNumber(finalManaged ? "FINAL_30_MANAGED_EARLY_MAX_SECONDS_LEFT_TO_OPEN" : "FINAL_30_HIGH_EARLY_MAX_SECONDS_LEFT_TO_OPEN", 30)),
-        final30HighMinSecondsLeftToOpen: Number(getArgValue("--final-30-high-min-seconds-left") ?? envNumber(finalManaged ? "FINAL_30_MANAGED_MIN_SECONDS_LEFT_TO_OPEN" : "FINAL_30_HIGH_MIN_SECONDS_LEFT_TO_OPEN", 0)),
+        final30HighMinSecondsLeftToOpen: Number(getArgValue("--final-30-high-min-seconds-left") ?? envNumber(finalManaged ? "FINAL_30_MANAGED_MIN_SECONDS_LEFT_TO_OPEN" : "FINAL_30_HIGH_MIN_SECONDS_LEFT_TO_OPEN", finalManaged ? 8 : 0)),
         final30HedgedMaxPairCost: Number(getArgValue("--final-30-hedged-max-pair-cost") ?? envNumber("FINAL_30_HEDGED_MAX_PAIR_COST", 0.95)),
         final30ManagedEarlyBtcMinMoveUsd: Number(getArgValue("--final-30-managed-early-btc-move-usd") ?? envNumber("FINAL_30_MANAGED_EARLY_BTC_MIN_MOVE_USD", 0)),
         final30ManagedEarlyBtcMinAsk: Number(getArgValue("--final-30-managed-early-btc-min-ask") ?? envNumber("FINAL_30_MANAGED_EARLY_BTC_MIN_ASK", 0.85)),
