@@ -26,6 +26,11 @@ export type Btc5mConditionalMarketMakerParams = {
     forceFlattenSecondsBeforeEnd: number;
     maxUnpairedSeconds: number;
     pairOrderMaxAgeSeconds: number;
+    // 可选：买单价格上限（cmm 不使用，cmm-v2 用于只买低价腿）。
+    maxBidPrice?: number;
+    minBidPrice?: number;
+    minSecondsLeftToBuy?: number;
+    buyLegsOnly?: "BOTH" | "UP" | "DOWN";
 };
 
 export type Btc5mConditionalMarketMakerInput = Btc5mMarketMakerInput & {

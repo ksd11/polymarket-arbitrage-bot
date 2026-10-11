@@ -5,6 +5,8 @@ import "./setup-proxy";
 import "./patch-exchange-v2";
 
 import { ClobClient, CreateOrderOptions, OrderType, Side, UserOrderV2 as UserOrder } from "@polymarket/clob-client-v2";
+import { appendFileSync, existsSync, mkdirSync } from "fs";
+import { dirname, resolve } from "path";
 import { config } from "./config";
 import { getClobClient } from "./providers/clobclient";
 import { WebSocketOrderBook, TokenPrice } from "./providers/websocketOrderbook";
@@ -14,8 +16,10 @@ import { approveUSDCAllowance, updateClobBalanceAllowance } from "./security/all
 import { waitForMinimumUsdcBalance } from "./utils/balance";
 import { logger } from "./utils/logger";
 import { setupConsoleFileLogging } from "./utils/console-file";
+import { estimatedMakerRebate, evaluateBtc5mMakerRangeRisk, polymarketFeeEquivalent } from "./strategies/btc5m/maker-range";
 
 type ArbConfig = {
+    mode: "range-arb" | "maker-range";
     dryRun: boolean;
     market: string;
     intervalMinutes: number;
@@ -28,6 +32,17 @@ type ArbConfig = {
     requireAmplitude: boolean;
     amplitudeLookbackSeconds: number;
     amplitudeBuffer: number;
+    orderShares: number;
+    maxUnpairedSeconds: number;
+    stopLossDelta: number;
+    forceExitSecondsLeft: number;
+    orderPollIntervalMs: number;
+    marketLogIntervalMs: number;
+    recordIntervalMs: number;
+    recordEnabled: boolean;
+    recordPath: string;
+    takerFeeRate: number;
+    makerRebateRate: number;
 };
 
 type MarketTokens = {
@@ -43,18 +58,26 @@ type MarketTokens = {
 
 type PlacedOrder = {
     leg: "UP" | "DOWN";
+    side: "BUY" | "SELL";
+    role: "entry" | "risk-exit";
     orderId: string;
     tokenId: string;
     price: number;
     size: number;
     filledSize: number;
     status: string;
+    createdAtMs: number;
+    maker: boolean;
 };
 
 type PricePoint = {
     t: number;
     upAsk: number;
 };
+
+function formatBook(price: TokenPrice | null): string {
+    return `bid=${price?.bestBid?.toFixed(2) ?? "--"} ask=${price?.bestAsk?.toFixed(2) ?? "--"}`;
+}
 
 function envString(name: string, fallback: string): string {
     const value = process.env[name]?.trim();
@@ -75,19 +98,35 @@ function envBool(name: string, fallback: boolean): boolean {
 }
 
 function loadArbConfig(): ArbConfig {
+    const mode = process.env.BTC5M_RANGE_MODE === "maker-range" ? "maker-range" : "range-arb";
+    const makerRange = mode === "maker-range";
+    const priceX = makerRange ? envNumber("MAKER_RANGE_PRICE", 0.4) : envNumber("RANGE_ARB_PRICE_X", 0.4);
+    const orderShares = makerRange ? envNumber("MAKER_RANGE_ORDER_SHARES", 5) : 0;
     const cfg: ArbConfig = {
-        dryRun: envBool("RANGE_ARB_DRY_RUN", true),
+        mode,
+        dryRun: makerRange ? envBool("MAKER_RANGE_DRY_RUN", true) : envBool("RANGE_ARB_DRY_RUN", true),
         market: envString("RANGE_ARB_MARKET", envString("BTC5M_MARKET", "btc")).toLowerCase(),
         intervalMinutes: envNumber("RANGE_ARB_INTERVAL_MINUTES", envNumber("BTC5M_INTERVAL_MINUTES", 5)),
-        priceX: envNumber("RANGE_ARB_PRICE_X", 0.4),
-        usdcPerLeg: envNumber("RANGE_ARB_USDC_PER_LEG", 5),
+        priceX,
+        usdcPerLeg: makerRange ? priceX * orderShares : envNumber("RANGE_ARB_USDC_PER_LEG", 5),
         tickSize: envString("RANGE_ARB_TICK_SIZE", envString("BTC5M_TICK_SIZE", "0.01")) as CreateOrderOptions["tickSize"],
         negRisk: envBool("RANGE_ARB_NEG_RISK", envBool("BTC5M_NEG_RISK", config.copytrade.negRisk)),
-        minSecondsLeftToOpen: envNumber("RANGE_ARB_MIN_SECONDS_LEFT_TO_OPEN", 60),
-        cancelSecondsBeforeEnd: envNumber("RANGE_ARB_CANCEL_SECONDS_BEFORE_END", envNumber("BTC5M_CANCEL_SECONDS_BEFORE_END", 8)),
+        minSecondsLeftToOpen: makerRange ? envNumber("MAKER_RANGE_MIN_SECONDS_LEFT_TO_OPEN", 90) : envNumber("RANGE_ARB_MIN_SECONDS_LEFT_TO_OPEN", 60),
+        cancelSecondsBeforeEnd: makerRange ? envNumber("MAKER_RANGE_CANCEL_SECONDS_BEFORE_END", 30) : envNumber("RANGE_ARB_CANCEL_SECONDS_BEFORE_END", envNumber("BTC5M_CANCEL_SECONDS_BEFORE_END", 8)),
         requireAmplitude: envBool("RANGE_ARB_REQUIRE_AMPLITUDE", false),
         amplitudeLookbackSeconds: envNumber("RANGE_ARB_AMPLITUDE_LOOKBACK_SECONDS", 120),
         amplitudeBuffer: envNumber("RANGE_ARB_AMPLITUDE_BUFFER", 0.03),
+        orderShares,
+        maxUnpairedSeconds: envNumber("MAKER_RANGE_MAX_UNPAIRED_SECONDS", 45),
+        stopLossDelta: envNumber("MAKER_RANGE_STOP_LOSS_DELTA", 0.10),
+        forceExitSecondsLeft: envNumber("MAKER_RANGE_FORCE_EXIT_SECONDS_LEFT", 60),
+        orderPollIntervalMs: envNumber("MAKER_RANGE_ORDER_POLL_INTERVAL_MS", 1000),
+        marketLogIntervalMs: envNumber("MAKER_RANGE_MARKET_LOG_INTERVAL_MS", 1000),
+        recordIntervalMs: envNumber("MAKER_RANGE_RECORD_INTERVAL_MS", 1000),
+        recordEnabled: makerRange && envBool("MAKER_RANGE_RECORD_ENABLED", true),
+        recordPath: resolve(envString("MAKER_RANGE_RECORD_FILE", "data/btc5m-maker-range-live.csv")),
+        takerFeeRate: envNumber("MAKER_RANGE_TAKER_FEE_RATE", 0.07),
+        makerRebateRate: envNumber("MAKER_RANGE_REBATE_RATE", 0.20),
     };
 
     if (cfg.intervalMinutes <= 0) throw new Error("RANGE_ARB_INTERVAL_MINUTES must be > 0");
@@ -95,7 +134,21 @@ function loadArbConfig(): ArbConfig {
     if (!(cfg.usdcPerLeg > 0)) throw new Error("RANGE_ARB_USDC_PER_LEG must be > 0");
     if (cfg.minSecondsLeftToOpen < 0) throw new Error("RANGE_ARB_MIN_SECONDS_LEFT_TO_OPEN must be >= 0");
     if (cfg.cancelSecondsBeforeEnd < 0) throw new Error("RANGE_ARB_CANCEL_SECONDS_BEFORE_END must be >= 0");
+    if (makerRange && (!(cfg.orderShares >= 5) || cfg.maxUnpairedSeconds <= 0 || cfg.stopLossDelta <= 0 || cfg.stopLossDelta >= cfg.priceX || cfg.forceExitSecondsLeft < cfg.cancelSecondsBeforeEnd || cfg.orderPollIntervalMs <= 0 || cfg.recordIntervalMs <= 0)) throw new Error("Invalid MAKER_RANGE configuration");
     return cfg;
+}
+
+const RECORD_HEADERS = ["row_type", "timestamp", "timestamp_ms", "slug", "condition_id", "seconds_left", "up_bid", "up_ask", "down_bid", "down_ask", "event_leg", "event_side", "event_role", "event_price", "event_size", "order_id", "order_status", "filled_size", "inventory_up", "inventory_down", "buy_cost", "sell_proceeds", "maker_fee_equivalent", "estimated_rebate", "estimated_taker_fees", "note"] as const;
+
+function csvValue(value: unknown): string {
+    const text = value === undefined || value === null ? "" : String(value);
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function appendRecord(path: string, row: Record<string, unknown>): void {
+    mkdirSync(dirname(path), { recursive: true });
+    if (!existsSync(path)) appendFileSync(path, `${RECORD_HEADERS.join(",")}\n`);
+    appendFileSync(path, `${RECORD_HEADERS.map((header) => csvValue(row[header])).join(",")}\n`);
 }
 
 function cycleStart(now: Date, intervalMinutes: number): Date {
@@ -166,17 +219,31 @@ class BtcFiveMinuteRangeArbBot {
     private priceHistory: PricePoint[] = [];
     private timers: NodeJS.Timeout[] = [];
     private stopped = false;
+    private inventoryUp = 0;
+    private inventoryDown = 0;
+    private buyCost = 0;
+    private sellProceeds = 0;
+    private makerFeeEquivalent = 0;
+    private estimatedRebate = 0;
+    private estimatedTakerFees = 0;
+    private firstFillAtMs?: number;
+    private pairLocked = false;
+    private riskExitStarted = false;
+    private lastMarketLogAtMs = 0;
+    private lastRecordAtMs = 0;
+    private riskManagementInFlight = false;
 
     constructor(private client: ClobClient, private cfg: ArbConfig) {}
 
     async start(): Promise<void> {
-        logger.info(`Starting BTC 5m range arb: market=${this.cfg.market}, x=${this.cfg.priceX}, y=${this.cfg.usdcPerLeg}, dryRun=${this.cfg.dryRun}`);
+        logger.info(`Starting BTC 5m ${this.cfg.mode}: market=${this.cfg.market}, price=${this.cfg.priceX}, shares=${this.cfg.mode === "maker-range" ? this.cfg.orderShares : (this.cfg.usdcPerLeg / this.cfg.priceX).toFixed(4)}, postOnly=${this.cfg.mode === "maker-range"}, dryRun=${this.cfg.dryRun}`);
+        if (this.cfg.recordEnabled) logger.info(`Maker-range trajectory CSV: ${this.cfg.recordPath}`);
         this.ws = new WebSocketOrderBook("market", [], null);
         await this.ws.connect();
         await this.initializeCurrentCycle();
 
         this.timers.push(setInterval(() => void this.handleCycleTick(), 5_000));
-        this.timers.push(setInterval(() => void this.pollOrders(), 2_000));
+        this.timers.push(setInterval(() => void this.pollOrders(), this.cfg.mode === "maker-range" ? this.cfg.orderPollIntervalMs : 2_000));
     }
 
     async stop(): Promise<void> {
@@ -200,7 +267,12 @@ class BtcFiveMinuteRangeArbBot {
 
         const secondsLeft = (this.tokens.endMs - Date.now()) / 1000;
         if (secondsLeft <= this.cfg.cancelSecondsBeforeEnd) {
-            await this.cancelOpenOrders(`cycle ending in ${secondsLeft.toFixed(1)}s`);
+            if (this.cfg.mode === "maker-range") {
+                await this.cancelEntryOrders(`cycle ending in ${secondsLeft.toFixed(1)}s`);
+                await this.manageMakerRangeRisk();
+            } else {
+                await this.cancelOpenOrders(`cycle ending in ${secondsLeft.toFixed(1)}s`);
+            }
         }
     }
 
@@ -209,6 +281,19 @@ class BtcFiveMinuteRangeArbBot {
         this.placed = false;
         this.orders = [];
         this.priceHistory = [];
+        this.inventoryUp = 0;
+        this.inventoryDown = 0;
+        this.buyCost = 0;
+        this.sellProceeds = 0;
+        this.makerFeeEquivalent = 0;
+        this.estimatedRebate = 0;
+        this.estimatedTakerFees = 0;
+        this.firstFillAtMs = undefined;
+        this.pairLocked = false;
+        this.riskExitStarted = false;
+        this.lastMarketLogAtMs = 0;
+        this.lastRecordAtMs = 0;
+        this.riskManagementInFlight = false;
     }
 
     private async initializeCurrentCycle(): Promise<void> {
@@ -241,7 +326,27 @@ class BtcFiveMinuteRangeArbBot {
             const cutoff = Date.now() - this.cfg.amplitudeLookbackSeconds * 1000;
             this.priceHistory = this.priceHistory.filter((p) => p.t >= cutoff);
         }
+        if (this.cfg.mode === "maker-range") {
+            this.logAndRecordMarket();
+            void this.manageMakerRangeRisk();
+        }
         void this.maybePlaceCycleOrders();
+    }
+
+    private logAndRecordMarket(): void {
+        if (!this.tokens || !this.ws) return;
+        const now = Date.now();
+        const up = this.ws.getPrice(this.tokens.upTokenId);
+        const down = this.ws.getPrice(this.tokens.downTokenId);
+        const secondsLeft = (this.tokens.endMs - now) / 1000;
+        if (now - this.lastMarketLogAtMs >= this.cfg.marketLogIntervalMs) {
+            logger.info(`📊 Up ${formatBook(up)} | Down ${formatBook(down)} | Left ${secondsLeft.toFixed(1)}s | Inventory ${this.inventoryUp.toFixed(4)}/${this.inventoryDown.toFixed(4)}`);
+            this.lastMarketLogAtMs = now;
+        }
+        if (this.cfg.recordEnabled && now - this.lastRecordAtMs >= this.cfg.recordIntervalMs) {
+            this.record("market", { seconds_left: secondsLeft.toFixed(3), up_bid: up?.bestBid, up_ask: up?.bestAsk, down_bid: down?.bestBid, down_ask: down?.bestAsk });
+            this.lastRecordAtMs = now;
+        }
     }
 
     private amplitudeOk(): boolean {
@@ -268,15 +373,28 @@ class BtcFiveMinuteRangeArbBot {
         }
         if (!this.amplitudeOk()) return;
 
-        const size = this.cfg.usdcPerLeg / this.cfg.priceX;
+        if (this.cfg.mode === "maker-range" && this.ws) {
+            const upAsk = this.ws.getPrice(this.tokens.upTokenId)?.bestAsk;
+            const downAsk = this.ws.getPrice(this.tokens.downTokenId)?.bestAsk;
+            if (upAsk === null || upAsk === undefined || downAsk === null || downAsk === undefined) return;
+            if (upAsk <= this.cfg.priceX || downAsk <= this.cfg.priceX) {
+                logger.info(`Post-only gate waiting: asks=${upAsk.toFixed(2)}/${downAsk.toFixed(2)} must both be above ${this.cfg.priceX.toFixed(2)}`);
+                return;
+            }
+        }
+
+        const size = this.cfg.mode === "maker-range" ? this.cfg.orderShares : this.cfg.usdcPerLeg / this.cfg.priceX;
         const lockedProfit = size - 2 * this.cfg.usdcPerLeg;
         logger.info(`Placing pair orders for ${this.tokens.slug}: BUY UP ${size.toFixed(4)} @ ${this.cfg.priceX}, BUY DOWN ${size.toFixed(4)} @ ${this.cfg.priceX}`);
         logger.info(`If both legs fill: cost=${(2 * this.cfg.usdcPerLeg).toFixed(4)} USDC, payout=${size.toFixed(4)} USDC, profit=${lockedProfit.toFixed(4)} USDC`);
 
         this.placed = true;
-        const upOrder = await this.placeBuy("UP", this.tokens.upTokenId, size);
-        const downOrder = await this.placeBuy("DOWN", this.tokens.downTokenId, size);
+        const [upOrder, downOrder] = await Promise.all([
+            this.placeBuy("UP", this.tokens.upTokenId, size),
+            this.placeBuy("DOWN", this.tokens.downTokenId, size),
+        ]);
         this.orders = [upOrder, downOrder].filter(Boolean) as PlacedOrder[];
+        if (this.cfg.mode === "maker-range" && this.orders.length !== 2) await this.cancelOpenOrders("incomplete post-only pair placement");
     }
 
     private async placeBuy(leg: "UP" | "DOWN", tokenId: string, size: number): Promise<PlacedOrder | null> {
@@ -297,15 +415,18 @@ class BtcFiveMinuteRangeArbBot {
             const response = await this.client.createAndPostOrder(
                 order,
                 { tickSize: this.cfg.tickSize, negRisk: this.cfg.negRisk },
-                OrderType.GTC
+                OrderType.GTC,
+                this.cfg.mode === "maker-range"
             );
             const orderId = response?.orderID;
             if (!orderId) {
                 logger.error(`Order for ${leg} returned no orderID`);
                 return null;
             }
-            logger.info(`Posted ${leg} order ${orderId.slice(0, 12)}...: ${size.toFixed(4)} @ ${this.cfg.priceX.toFixed(4)}`);
-            return { leg, orderId, tokenId, price: this.cfg.priceX, size, filledSize: 0, status: "NEW" };
+            logger.info(`Posted ${this.cfg.mode === "maker-range" ? "post-only " : ""}${leg} order ${orderId.slice(0, 12)}...: ${size.toFixed(4)} @ ${this.cfg.priceX.toFixed(4)}`);
+            const placed: PlacedOrder = { leg, side: "BUY", role: "entry", orderId, tokenId, price: this.cfg.priceX, size, filledSize: 0, status: "NEW", createdAtMs: Date.now(), maker: this.cfg.mode === "maker-range" };
+            this.recordOrder("order_posted", placed);
+            return placed;
         } catch (error) {
             logger.error(`Failed to post ${leg} order: ${error instanceof Error ? error.message : String(error)}`);
             return null;
@@ -320,7 +441,10 @@ class BtcFiveMinuteRangeArbBot {
                 const latest = await this.client.getOrder(order.orderId);
                 if (!latest) continue;
                 order.status = String((latest as any).status || order.status);
-                order.filledSize = orderFilledSize(latest);
+                const latestFilledSize = orderFilledSize(latest);
+                const fillDelta = Math.max(0, latestFilledSize - order.filledSize);
+                if (fillDelta > 0) this.applyFill(order, fillDelta);
+                order.filledSize = latestFilledSize;
                 logger.info(`Order ${order.leg}: status=${order.status}, filled=${order.filledSize.toFixed(4)}/${order.size.toFixed(4)}`);
             } catch (error) {
                 logger.error(`Failed to poll ${order.leg} order ${order.orderId.slice(0, 12)}...: ${error instanceof Error ? error.message : String(error)}`);
@@ -329,24 +453,200 @@ class BtcFiveMinuteRangeArbBot {
 
         const up = this.orders.find((o) => o.leg === "UP");
         const down = this.orders.find((o) => o.leg === "DOWN");
-        if (up && down && up.filledSize >= up.size && down.filledSize >= down.size) {
+        if (!this.pairLocked && up && down && up.filledSize >= up.size && down.filledSize >= down.size) {
             const payout = Math.min(up.filledSize, down.filledSize);
             const cost = up.filledSize * up.price + down.filledSize * down.price;
             logger.info(`PAIR LOCKED: payout=${payout.toFixed(4)}, cost=${cost.toFixed(4)}, expectedProfit=${(payout - cost).toFixed(4)} USDC`);
         }
+        if (this.cfg.mode === "maker-range") await this.manageMakerRangeRisk();
+    }
+
+    private applyFill(order: PlacedOrder, fillDelta: number): void {
+        if (order.side === "BUY") {
+            if (order.leg === "UP") this.inventoryUp += fillDelta;
+            else this.inventoryDown += fillDelta;
+            this.buyCost += order.price * fillDelta;
+            if (order.maker) {
+                const feeEquivalent = polymarketFeeEquivalent(fillDelta, order.price, this.cfg.takerFeeRate);
+                this.makerFeeEquivalent += feeEquivalent;
+                this.estimatedRebate += estimatedMakerRebate(fillDelta, order.price, this.cfg);
+            }
+        } else {
+            if (order.leg === "UP") this.inventoryUp = Math.max(0, this.inventoryUp - fillDelta);
+            else this.inventoryDown = Math.max(0, this.inventoryDown - fillDelta);
+            this.sellProceeds += order.price * fillDelta;
+            if (!order.maker) this.estimatedTakerFees += polymarketFeeEquivalent(fillDelta, order.price, this.cfg.takerFeeRate);
+        }
+        if (!this.firstFillAtMs && Math.abs(this.inventoryUp - this.inventoryDown) > 1e-9) this.firstFillAtMs = Date.now();
+        logger.info(`FILL ${order.maker ? "MAKER" : "TAKER"} ${order.side} ${order.leg} ${fillDelta.toFixed(4)} @ ${order.price.toFixed(4)} | inventory=${this.inventoryUp.toFixed(4)}/${this.inventoryDown.toFixed(4)} rebate≈${this.estimatedRebate.toFixed(5)}`);
+        this.recordOrder("order_fill", { ...order, filledSize: order.filledSize + fillDelta }, fillDelta);
+    }
+
+    private async manageMakerRangeRisk(): Promise<void> {
+        if (this.riskManagementInFlight) return;
+        this.riskManagementInFlight = true;
+        try {
+            await this.manageMakerRangeRiskInner();
+        } finally {
+            this.riskManagementInFlight = false;
+        }
+    }
+
+    private async manageMakerRangeRiskInner(): Promise<void> {
+        if (this.cfg.mode !== "maker-range" || !this.tokens || !this.ws || this.stopped || this.pairLocked) return;
+        const imbalance = this.inventoryUp - this.inventoryDown;
+        if (Math.abs(imbalance) <= 1e-9) {
+            if (this.inventoryUp > 0) {
+                this.pairLocked = true;
+                await this.cancelEntryOrders("pair locked");
+                const locked = Math.min(this.inventoryUp, this.inventoryDown);
+                const expectedProfit = locked - this.buyCost;
+                logger.info(`MAKER PAIR LOCKED: shares=${locked.toFixed(4)}, cost=${this.buyCost.toFixed(4)}, tradingProfit=${expectedProfit.toFixed(4)}, estimatedRebate=${this.estimatedRebate.toFixed(5)}`);
+                this.record("pair_locked", { note: `tradingProfit=${expectedProfit.toFixed(6)}` });
+            }
+            return;
+        }
+        if (!this.firstFillAtMs) return;
+        if (this.riskExitStarted) {
+            const activeExit = this.orders.find((order) => order.role === "risk-exit" && !isFinalOrderStatus(order.status));
+            if (activeExit && Date.now() - activeExit.createdAtMs < 2_000) return;
+            if (activeExit) await this.cancelOrder(activeExit, "reprice risk exit");
+            const remainingImbalance = this.inventoryUp - this.inventoryDown;
+            if (Math.abs(remainingImbalance) <= 1e-9) return;
+            const exitLeg = remainingImbalance > 0 ? "UP" : "DOWN";
+            const exitBook = this.ws.getPrice(exitLeg === "UP" ? this.tokens.upTokenId : this.tokens.downTokenId);
+            if (!exitBook?.bestBid) return;
+            const replacement = await this.placeRiskExit(exitLeg, Math.abs(remainingImbalance), exitBook.bestBid, "reprice");
+            if (replacement) this.orders.push(replacement);
+            else this.riskExitStarted = false;
+            return;
+        }
+        const heldLeg = imbalance > 0 ? "UP" : "DOWN";
+        const heldBook = this.ws.getPrice(heldLeg === "UP" ? this.tokens.upTokenId : this.tokens.downTokenId);
+        const secondsLeft = (this.tokens.endMs - Date.now()) / 1000;
+        const decision = evaluateBtc5mMakerRangeRisk({
+            heldLeg,
+            heldBid: heldBook?.bestBid ?? undefined,
+            firstFillAtMs: this.firstFillAtMs,
+            timestampMs: Date.now(),
+            secondsLeft,
+            params: {
+                price: this.cfg.priceX,
+                shares: this.cfg.orderShares,
+                maxUnpairedSeconds: this.cfg.maxUnpairedSeconds,
+                stopLossDelta: this.cfg.stopLossDelta,
+                forceExitSecondsLeft: this.cfg.forceExitSecondsLeft,
+                takerFeeRate: this.cfg.takerFeeRate,
+                makerRebateRate: this.cfg.makerRebateRate,
+            },
+        });
+        if (!decision.exit) return;
+        logger.warning(`Maker-range risk exit: ${decision.reason}, held=${heldLeg}, bid=${heldBook?.bestBid?.toFixed(2) ?? "--"}, imbalance=${Math.abs(imbalance).toFixed(4)}`);
+        await this.cancelEntryOrders(`risk exit ${decision.reason}`);
+        const refreshedImbalance = this.inventoryUp - this.inventoryDown;
+        if (Math.abs(refreshedImbalance) <= 1e-9) return;
+        const exitLeg = refreshedImbalance > 0 ? "UP" : "DOWN";
+        const exitBook = this.ws.getPrice(exitLeg === "UP" ? this.tokens.upTokenId : this.tokens.downTokenId);
+        if (!exitBook?.bestBid) {
+            logger.error(`Cannot risk-exit ${exitLeg}: no best bid`);
+            return;
+        }
+        const placed = await this.placeRiskExit(exitLeg, Math.abs(refreshedImbalance), exitBook.bestBid, decision.reason ?? "risk");
+        if (placed) {
+            this.orders.push(placed);
+            this.riskExitStarted = true;
+        }
+    }
+
+    private async placeRiskExit(leg: "UP" | "DOWN", size: number, price: number, reason: string): Promise<PlacedOrder | null> {
+        if (!this.tokens) return null;
+        const tokenId = leg === "UP" ? this.tokens.upTokenId : this.tokens.downTokenId;
+        if (this.cfg.dryRun) {
+            logger.info(`[DRY-RUN] risk-exit SELL ${leg} ${size.toFixed(4)} @ ${price.toFixed(4)} (${reason})`);
+            return null;
+        }
+        try {
+            const response = await this.client.createAndPostOrder({ tokenID: tokenId, side: Side.SELL, price, size }, { tickSize: this.cfg.tickSize, negRisk: this.cfg.negRisk }, OrderType.GTC, false);
+            const orderId = response?.orderID;
+            if (!orderId) {
+                logger.error(`Risk-exit SELL ${leg} returned no orderID: ${JSON.stringify(response)}`);
+                return null;
+            }
+            const placed: PlacedOrder = { leg, side: "SELL", role: "risk-exit", orderId, tokenId, price, size, filledSize: 0, status: "NEW", createdAtMs: Date.now(), maker: false };
+            logger.info(`Posted risk-exit SELL ${leg} ${size.toFixed(4)} @ ${price.toFixed(4)} (${reason})`);
+            this.recordOrder("order_posted", placed);
+            return placed;
+        } catch (error) {
+            logger.error(`Failed risk-exit SELL ${leg}: ${error instanceof Error ? error.message : String(error)}`);
+            return null;
+        }
+    }
+
+    private async cancelEntryOrders(reason: string): Promise<void> {
+        for (const order of this.orders) {
+            if (order.role !== "entry" || isFinalOrderStatus(order.status)) continue;
+            await this.cancelOrder(order, reason);
+        }
+    }
+
+    private async cancelOrder(order: PlacedOrder, reason: string): Promise<void> {
+        try {
+            const latest = await this.client.getOrder(order.orderId);
+            if (latest) {
+                const latestFilledSize = orderFilledSize(latest);
+                const fillDelta = Math.max(0, latestFilledSize - order.filledSize);
+                if (fillDelta > 0) this.applyFill(order, fillDelta);
+                order.filledSize = latestFilledSize;
+                order.status = String((latest as any).status || order.status);
+            }
+            if (isFinalOrderStatus(order.status)) return;
+            await this.client.cancelOrder({ orderID: order.orderId });
+            order.status = "CANCELLED";
+            logger.info(`Cancelled ${order.leg} ${order.side} ${order.orderId.slice(0, 12)}... (${reason})`);
+            this.recordOrder("order_cancelled", order, undefined, reason);
+        } catch (error) {
+            logger.error(`Failed to cancel ${order.leg} order ${order.orderId.slice(0, 12)}...: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+
+    private record(rowType: string, values: Record<string, unknown> = {}): void {
+        if (!this.cfg.recordEnabled || !this.tokens) return;
+        appendRecord(this.cfg.recordPath, {
+            row_type: rowType,
+            timestamp: new Date().toISOString(),
+            timestamp_ms: Date.now(),
+            slug: this.tokens.slug,
+            condition_id: this.tokens.conditionId,
+            inventory_up: this.inventoryUp.toFixed(6),
+            inventory_down: this.inventoryDown.toFixed(6),
+            buy_cost: this.buyCost.toFixed(6),
+            sell_proceeds: this.sellProceeds.toFixed(6),
+            maker_fee_equivalent: this.makerFeeEquivalent.toFixed(6),
+            estimated_rebate: this.estimatedRebate.toFixed(6),
+            estimated_taker_fees: this.estimatedTakerFees.toFixed(6),
+            ...values,
+        });
+    }
+
+    private recordOrder(rowType: string, order: PlacedOrder, fillSize?: number, note?: string): void {
+        this.record(rowType, {
+            event_leg: order.leg,
+            event_side: order.side,
+            event_role: order.role,
+            event_price: order.price.toFixed(6),
+            event_size: order.size.toFixed(6),
+            order_id: order.orderId,
+            order_status: order.status,
+            filled_size: (fillSize ?? order.filledSize).toFixed(6),
+            note,
+        });
     }
 
     private async cancelOpenOrders(reason: string): Promise<void> {
         if (this.cfg.dryRun || this.orders.length === 0) return;
         for (const order of this.orders) {
             if (isFinalOrderStatus(order.status)) continue;
-            try {
-                await this.client.cancelOrder({ orderID: order.orderId });
-                order.status = "CANCELLED";
-                logger.info(`Cancelled ${order.leg} order ${order.orderId.slice(0, 12)}... (${reason})`);
-            } catch (error) {
-                logger.error(`Failed to cancel ${order.leg} order ${order.orderId.slice(0, 12)}...: ${error instanceof Error ? error.message : String(error)}`);
-            }
+            await this.cancelOrder(order, reason);
         }
     }
 }

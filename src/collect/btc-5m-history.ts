@@ -1,9 +1,10 @@
 // Setup global fetch proxy FIRST (before any other imports that might call fetch)
 import "../setup-proxy";
 
-import { appendFileSync, existsSync, mkdirSync } from "fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { resolve } from "path";
 import { MarketResolvedPayload, WebSocketOrderBook, TokenPrice } from "../providers/websocketOrderbook";
+import { PolymarketChainlinkBtcPriceProvider, defaultPolymarketChainlinkBtcPriceConfig } from "../providers/polymarketChainlinkBtcPriceProvider";
 import { logger } from "../utils/logger";
 
 type CollectConfig = {
@@ -14,6 +15,7 @@ type CollectConfig = {
     outDir: string;
     outFile: string;
     btcPriceEnabled: boolean;
+    btcPriceSource: "rest" | "polymarket-chainlink";
     btcPriceUrls: string[];
 };
 
@@ -45,7 +47,29 @@ type Sample = {
     winningOutcome: string;
     upTokenId: string;
     downTokenId: string;
+    btcSource: string;
+    /** Side-by-side price feeds, so the CEX-vs-Chainlink basis can be quantified per row. */
+    btcPriceRest: number | null;
+    openPriceRest: number | null;
+    btcPriceChainlink: number | null;
+    openPriceChainlink: number | null;
 };
+
+type PricePoint = { price: number; updatedAt: number };
+
+/** Price from `history` whose timestamp is closest to `timestampMs`, within tolerance. */
+function nearestPrice(history: PricePoint[], timestampMs: number, toleranceMs: number): number | null {
+    let best: PricePoint | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const point of history) {
+        const distance = Math.abs(point.updatedAt - timestampMs);
+        if (distance <= toleranceMs && distance < bestDistance) {
+            best = point;
+            bestDistance = distance;
+        }
+    }
+    return best?.price ?? null;
+}
 
 type ResolutionInfo = {
     winningAssetId: string;
@@ -102,6 +126,8 @@ function loadConfig(): CollectConfig {
                 ].join("|")
             )
         );
+    const btcPriceSource = (getArgValue("--btc-price-source") ?? envString("COLLECT_BTC_PRICE_SOURCE", "polymarket-chainlink")).toLowerCase();
+    if (!["rest", "polymarket-chainlink"].includes(btcPriceSource)) throw new Error("COLLECT_BTC_PRICE_SOURCE must be 'rest' or 'polymarket-chainlink'");
     const cfg: CollectConfig = {
         market: (getArgValue("--market") ?? envString("COLLECT_MARKET", envString("BTC5M_MARKET", "btc"))).toLowerCase(),
         intervalMinutes: Number(getArgValue("--interval-minutes") ?? envNumber("COLLECT_INTERVAL_MINUTES", envNumber("BTC5M_INTERVAL_MINUTES", 5))),
@@ -110,6 +136,7 @@ function loadConfig(): CollectConfig {
         outDir,
         outFile,
         btcPriceEnabled,
+        btcPriceSource: btcPriceSource as CollectConfig["btcPriceSource"],
         btcPriceUrls: parseList(priceUrls),
     };
 
@@ -118,7 +145,7 @@ function loadConfig(): CollectConfig {
     if (cfg.sampleMs <= 0) throw new Error("COLLECT_SAMPLE_MS must be > 0");
     if (!cfg.outDir) throw new Error("COLLECT_OUT_DIR is required");
     if (!cfg.outFile.endsWith(".csv")) throw new Error("COLLECT_OUT_FILE must end with .csv");
-    if (cfg.btcPriceEnabled && cfg.btcPriceUrls.length === 0) throw new Error("COLLECT_BTC_PRICE_URLS must include at least one URL when BTC price collection is enabled");
+    if (cfg.btcPriceEnabled && cfg.btcPriceSource === "rest" && cfg.btcPriceUrls.length === 0) throw new Error("COLLECT_BTC_PRICE_URLS must include at least one URL when BTC price collection uses the REST source");
     return cfg;
 }
 
@@ -233,7 +260,13 @@ function csvValue(value: string | number | null): string {
 }
 
 function writeHeaderIfNeeded(path: string): void {
-    if (existsSync(path)) return;
+    if (existsSync(path)) {
+        const head = readFileSync(path, "utf8").split("\n", 1)[0] ?? "";
+        if (!head.includes("btc_price_rest")) {
+            throw new Error(`Refusing to append to ${path}: existing header lacks the side-by-side price columns. Use a fresh --out-file.`);
+        }
+        return;
+    }
     const header = [
         "row_type",
         "timestamp",
@@ -253,6 +286,11 @@ function writeHeaderIfNeeded(path: string): void {
         "winning_outcome",
         "up_token_id",
         "down_token_id",
+        "btc_source",
+        "btc_price_rest",
+        "open_price_rest",
+        "btc_price_chainlink",
+        "open_price_chainlink",
     ];
     appendFileSync(path, `${header.join(",")}\n`);
 }
@@ -277,20 +315,35 @@ function writeSample(path: string, sample: Sample): void {
         sample.winningOutcome,
         sample.upTokenId,
         sample.downTokenId,
+        sample.btcSource,
+        sample.btcPriceRest,
+        sample.openPriceRest,
+        sample.btcPriceChainlink,
+        sample.openPriceChainlink,
     ];
     appendFileSync(path, `${values.map(csvValue).join(",")}\n`);
 }
 
 class BtcFiveMinuteHistoryCollector {
     private ws: WebSocketOrderBook | null = null;
+    private btcProvider: PolymarketChainlinkBtcPriceProvider | null = null;
     private tokens: MarketTokens | null = null;
     private openPrice: number | null = null;
     private latestBtcPrice: number | null = null;
+    private latestRest: number | null = null;
+    private latestChainlink: number | null = null;
+    private openRest: number | null = null;
+    private openChainlink: number | null = null;
+    private restHistory: PricePoint[] = [];
+    private chainlinkHistory: PricePoint[] = [];
+    private lastRestPollAt = 0;
     private knownMarkets = new Map<string, MarketTokens>();
     private resolutionsByAssetId = new Map<string, ResolutionInfo>();
     private timers: NodeJS.Timeout[] = [];
     private stopped = false;
     private readonly outputPath: string;
+    private readonly openToleranceMs = 5_000;
+    private readonly priceHistoryRetentionMs = 10 * 60_000;
 
     constructor(private cfg: CollectConfig) {
         this.outputPath = resolve(cfg.outDir, cfg.outFile);
@@ -304,7 +357,8 @@ class BtcFiveMinuteHistoryCollector {
         logger.info(`Duration: ${this.cfg.durationMs === 0 ? "forever" : `${(this.cfg.durationMs / 60_000).toFixed(2)}m`}, sampleMs=${this.cfg.sampleMs}`);
         logger.info(`External BTC price collection: ${this.cfg.btcPriceEnabled ? "enabled" : "disabled (Polymarket-only)"}`);
         if (this.cfg.btcPriceEnabled) {
-            logger.info(`BTC price sources: ${this.cfg.btcPriceUrls.map(hostLabel).join(", ")}`);
+            logger.info(`BTC primary feed (fills btc_price/open_price): ${this.cfg.btcPriceSource === "polymarket-chainlink" ? "polymarket-chainlink (wss://ws-live-data.polymarket.com)" : this.cfg.btcPriceUrls.map(hostLabel).join(", ")}`);
+            logger.info(`BTC reference feed (always recorded side by side): ${this.cfg.btcPriceSource === "polymarket-chainlink" ? this.cfg.btcPriceUrls.map(hostLabel).join(", ") || "(none)" : "polymarket-chainlink"}`);
         }
 
         this.ws = new WebSocketOrderBook("market", [], null);
@@ -313,8 +367,17 @@ class BtcFiveMinuteHistoryCollector {
         await this.initializeCurrentCycle();
 
         if (this.cfg.btcPriceEnabled) {
-            this.latestBtcPrice = await fetchBtcPrice(this.cfg.btcPriceUrls, this.latestBtcPrice);
-            this.openPrice = this.latestBtcPrice;
+            // Always run BOTH feeds: Chainlink (the settlement family) and the CEX REST reference.
+            // `btcPriceSource` only decides which one fills the legacy btc_price / btc_source columns.
+            try {
+                this.btcProvider = new PolymarketChainlinkBtcPriceProvider({ ...defaultPolymarketChainlinkBtcPriceConfig(), maxStalenessMs: 30_000 });
+                await this.btcProvider.start();
+            } catch (error) {
+                logger.error(`Chainlink reference feed unavailable: ${error instanceof Error ? error.message : String(error)}`);
+                this.btcProvider = null;
+            }
+            await this.refreshBtcPrice();
+            if (this.tokens) this.captureOpenPrices(this.tokens.startMs);
         }
 
         this.timers.push(setInterval(() => void this.handleCycleTick(), 2_000));
@@ -337,6 +400,7 @@ class BtcFiveMinuteHistoryCollector {
             this.ws.unsubscribeFromTokenIds([this.tokens.upTokenId, this.tokens.downTokenId]);
         }
         if (this.ws) this.ws.disconnect();
+        this.btcProvider?.stop();
         logger.info(`BTC 5m history collector stopped: ${reason}`);
         process.exit(0);
     }
@@ -348,7 +412,10 @@ class BtcFiveMinuteHistoryCollector {
             this.tokens = tokens;
             this.knownMarkets.set(tokens.upTokenId, tokens);
             this.knownMarkets.set(tokens.downTokenId, tokens);
-            this.openPrice = this.latestBtcPrice;
+            this.openPrice = null;
+            this.openRest = null;
+            this.openChainlink = null;
+            this.captureOpenPrices(tokens.startMs);
             logger.info(`Cycle ready: ${tokens.slug}`);
 
             if (!this.ws) throw new Error("WebSocket is not initialized");
@@ -371,13 +438,61 @@ class BtcFiveMinuteHistoryCollector {
         }
     }
 
+    private trimHistory(history: PricePoint[]): PricePoint[] {
+        const cutoff = Date.now() - this.priceHistoryRetentionMs;
+        return history.filter((point) => point.updatedAt >= cutoff);
+    }
+
+    /** Label describing which feed currently backs the legacy btc_price / open_price columns. */
+    private primarySourceLabel(): string {
+        if (this.cfg.btcPriceSource === "polymarket-chainlink") return this.btcProvider?.getSnapshot()?.source ?? "";
+        return this.latestRest !== null ? `rest:${hostLabel(this.cfg.btcPriceUrls[0] ?? "")}` : "";
+    }
+
+    /** Poll both feeds; assign the legacy columns from the configured primary. */
     private async refreshBtcPrice(): Promise<void> {
         if (this.stopped) return;
-        const price = await fetchBtcPrice(this.cfg.btcPriceUrls, this.latestBtcPrice);
-        if (price !== null) {
-            this.latestBtcPrice = price;
-            if (this.openPrice === null) this.openPrice = price;
+        const now = Date.now();
+
+        if (this.btcProvider) {
+            const price = this.btcProvider.getPrice();
+            if (price !== null) {
+                this.latestChainlink = price;
+                this.chainlinkHistory.push({ price, updatedAt: this.btcProvider.getSnapshot()?.updatedAt ?? now });
+                this.chainlinkHistory = this.trimHistory(this.chainlinkHistory);
+                if (this.cfg.btcPriceSource === "polymarket-chainlink") this.latestBtcPrice = price;
+            }
         }
+
+        if (this.cfg.btcPriceUrls.length > 0 && now - this.lastRestPollAt >= 2_000) {
+            this.lastRestPollAt = now;
+            const price = await fetchBtcPrice(this.cfg.btcPriceUrls, this.latestRest);
+            if (price !== null) {
+                this.latestRest = price;
+                this.restHistory.push({ price, updatedAt: now });
+                this.restHistory = this.trimHistory(this.restHistory);
+                if (this.cfg.btcPriceSource === "rest") this.latestBtcPrice = price;
+            }
+        }
+        // NOTE: the legacy primary column is assigned the moment its own feed updates (above), never
+        // after the awaits below -- otherwise captureSample can observe a stale btc_price while
+        // btc_price_chainlink is already fresh. open_price is owned by captureOpenPrices() and must
+        // stay null when the window opened before the collector started.
+    }
+
+    /**
+     * Capture each feed's price at the window's opening instant. Only accepted when a sample
+     * within tolerance of the start exists, or when we are currently within tolerance of it --
+     * a collector started mid-window must not record a bogus "open".
+     */
+    private captureOpenPrices(startMs: number): void {
+        const fresh = Date.now() - startMs <= this.openToleranceMs;
+        this.openRest = nearestPrice(this.restHistory, startMs, this.openToleranceMs) ?? (fresh ? this.latestRest : null);
+        this.openChainlink = nearestPrice(this.chainlinkHistory, startMs, this.openToleranceMs) ?? (fresh ? this.latestChainlink : null);
+        this.openPrice = this.cfg.btcPriceSource === "polymarket-chainlink"
+            ? this.openChainlink ?? this.openRest
+            : this.openRest ?? this.openChainlink;
+        logger.info(`Open prices for ${new Date(startMs).toISOString()}: chainlink=${this.openChainlink ?? "--"} rest=${this.openRest ?? "--"}`);
     }
 
     private captureSample(): void {
@@ -405,9 +520,26 @@ class BtcFiveMinuteHistoryCollector {
             winningOutcome: resolution?.winningOutcome ?? "",
             upTokenId: this.tokens.upTokenId,
             downTokenId: this.tokens.downTokenId,
+            btcSource: this.primarySourceLabel(),
+            btcPriceRest: this.latestRest,
+            openPriceRest: this.openRest,
+            btcPriceChainlink: this.latestChainlink,
+            openPriceChainlink: this.openChainlink,
         };
         writeSample(this.outputPath, sample);
-        logger.info(`Wrote sample ${sample.slug}: btc=${sample.btcPrice ?? "--"} upAsk=${sample.upAsk ?? "--"} downAsk=${sample.downAsk ?? "--"}`);
+        // Compact log: never echo the same number twice. `cl=` only appears when the legacy primary
+        // column has drifted from the Chainlink feed (that is exactly how the one-cycle staleness bug
+        // was caught), and the basis replaces the redundant "rest=" repeat.
+        const parts = [`btc=${sample.btcPrice ?? "--"}`, `[${sample.btcSource || "none"}]`];
+        if (sample.btcPriceChainlink !== null && sample.btcPrice !== sample.btcPriceChainlink) {
+            parts.push(`cl=${sample.btcPriceChainlink}`);
+        }
+        if (sample.btcPriceChainlink !== null && sample.btcPriceRest !== null && sample.btcPriceChainlink > 0) {
+            const basisBps = (sample.btcPriceRest / sample.btcPriceChainlink - 1) * 1e4;
+            parts.push(`basis=${basisBps >= 0 ? "+" : ""}${basisBps.toFixed(2)}bps`);
+        }
+        parts.push(`upAsk=${sample.upAsk ?? "--"}`, `downAsk=${sample.downAsk ?? "--"}`);
+        logger.info(`Wrote sample ${sample.slug}: ${parts.join(" ")}`);
     }
 
     private handleMarketResolved(payload: MarketResolvedPayload): void {
@@ -446,6 +578,11 @@ class BtcFiveMinuteHistoryCollector {
             winningOutcome: resolution.winningOutcome,
             upTokenId: tokens.upTokenId,
             downTokenId: tokens.downTokenId,
+            btcSource: this.primarySourceLabel(),
+            btcPriceRest: this.latestRest,
+            openPriceRest: this.openRest,
+            btcPriceChainlink: this.latestChainlink,
+            openPriceChainlink: this.openChainlink,
         };
         writeSample(this.outputPath, sample);
         logger.info(`Wrote resolution ${tokens.slug}: winner=${sample.winningOutcome || sample.winningAssetId}`);

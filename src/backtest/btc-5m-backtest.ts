@@ -3,6 +3,7 @@ import { dirname, resolve } from "path";
 import { buildBtc5mEdgeOrders, fairUpProbability } from "../strategies/btc5m/edge";
 import { buildBtc5mMarketMakerQuotes } from "../strategies/btc5m/market-maker";
 import { buildBtc5mConditionalMarketMakerQuotes, Btc5mConditionalMarketMakerSample } from "../strategies/btc5m/conditional-market-maker";
+import { buildBtc5mConditionalMarketMakerV2Quotes } from "../strategies/btc5m/conditional-market-maker-v2";
 import { buildBtc5mRangeArbOrders } from "../strategies/btc5m/range-arb";
 import { buildBtc5mHybridOrders, PriceSnapshot } from "../strategies/btc5m/hybrid";
 import { buildBtc5mManagedEdgeOrders } from "../strategies/btc5m/managed-edge";
@@ -25,9 +26,11 @@ import { Btc5mRegimeSnapshot } from "../strategies/btc5m/regime";
 import { Btc5mStrategyQuote } from "../strategies/btc5m/types";
 import { buildBtc5mRangeMidReversionOrders, Btc5mRangeMidPosition, Btc5mRangeMidSample } from "../strategies/btc5m/range-mid-reversion";
 import { Btc5mConditionalReboundFeatures, Btc5mConditionalReboundTrainingSample, predictBtc5mConditionalRebound, trainBtc5mConditionalReboundModel } from "../strategies/btc5m/conditional-rebound";
+import { estimatedMakerRebate, evaluateBtc5mMakerRangeRisk, polymarketFeeEquivalent } from "../strategies/btc5m/maker-range";
+import { buildBtc5mReverseTouchEdgeOrders, Btc5mReverseTouchEdgeParams, Btc5mReverseTouchEdgeState } from "../strategies/btc5m/reverse-touch-edge";
 
 type Leg = "UP" | "DOWN";
-type BacktestStrategy = "edge" | "range-arb" | "range-mid-reversion" | "conditional-rebound" | "market-maker" | "conditional-market-maker" | "hybrid" | "managed-edge" | "adaptive-edge" | "trend-pullback" | "trend-range-switch" | "trend-range-regime" | "trend-range-overlay" | "adaptive-overlay" | "sustained-high" | "latency-scalp" | "deep-rebound" | "extreme-020-rebound" | "final-30-high" | "final-30-hedged" | "final-30-managed" | "undervalued-hold" | "undervalued-final-managed" | "dynamic-range-pullback" | "dynamic-range-final-managed";
+type BacktestStrategy = "edge" | "range-arb" | "maker-range" | "reverse-touch-edge" | "range-mid-reversion" | "conditional-rebound" | "market-maker" | "conditional-market-maker" | "conditional-market-maker-v2" | "hybrid" | "managed-edge" | "adaptive-edge" | "trend-pullback" | "trend-range-switch" | "trend-range-regime" | "trend-range-overlay" | "adaptive-overlay" | "sustained-high" | "latency-scalp" | "deep-rebound" | "extreme-020-rebound" | "final-30-high" | "final-30-hedged" | "final-30-managed" | "undervalued-hold" | "undervalued-final-managed" | "dynamic-range-pullback" | "dynamic-range-final-managed";
 
 type BacktestConfig = {
     strategy: BacktestStrategy;
@@ -44,6 +47,15 @@ type BacktestConfig = {
     maxPrice: number;
     rangePriceX: number;
     rangeUsdcPerLeg: number;
+    makerRangePrice: number;
+    makerRangeShares: number;
+    makerRangeMinSecondsLeftToOpen: number;
+    makerRangeForceExitSecondsLeft: number;
+    makerRangeMaxUnpairedSeconds: number;
+    makerRangeStopLossDelta: number;
+    makerRangeTakerFeeRate: number;
+    makerRangeRebateRate: number;
+    reverseTouchParams: Btc5mReverseTouchEdgeParams;
     rangeMidObserveSeconds: number;
     rangeMidProfitDelta: number;
     rangeMidMaxHoldSeconds: number;
@@ -90,6 +102,10 @@ type BacktestConfig = {
     conditionalMmForceFlattenSecondsBeforeEnd: number;
     conditionalMmMaxUnpairedSeconds: number;
     conditionalMmPairOrderMaxAgeSeconds: number;
+    conditionalMmV2MinBidPrice: number;
+    conditionalMmV2MaxBidPrice: number;
+    conditionalMmV2MinSecondsLeftToBuy: number;
+    conditionalMmV2BuyLegsOnly: "BOTH" | "UP" | "DOWN";
     // Hybrid params
     hybridLookbackSeconds: number;
     hybridOscillationThreshold: number;
@@ -236,9 +252,14 @@ type BacktestConfig = {
     final30ManagedNightMinDirectionalMarginBps: number;
     final30ManagedTakeProfitDelta: number;
     final30ManagedStopLossDelta: number;
+    final30ManagedStopLossPrice: number;
     final30ManagedStopMinBtcReversalBps: number;
     final30ManagedStopConfirmSeconds: number;
     final30ManagedStopMaxDirectionalMarginBps: number;
+    final30ManagedEntryVelocityLookbackSeconds: number;
+    final30ManagedEntryMinBtcVelocityBpsPerSec: number;
+    final30ManagedEntryAccelerationLookbackSeconds: number;
+    final30ManagedEntryMinBtcAccelerationBpsPerSec2: number;
     undervaluedHoldMinEntryPrice: number;
     undervaluedHoldMaxEntryPrice: number;
     undervaluedHoldOrderShares: number;
@@ -262,6 +283,10 @@ type BacktestConfig = {
     undervaluedHoldStopLossPct: number;
     dynamicRangePullbackParams: Btc5mDynamicRangePullbackParams;
     adaptiveOverlayDeepInRange: boolean;
+    // Charged on every taker entry/exit (Polymarket crypto fee equivalent). 0 disables fees -> gross backtest.
+    takerFeeRate: number;
+    // "taker": fill at the snapshot ask immediately. "maker": rest the limit and fill only on a later touch (live GTC).
+    fillMode: "taker" | "maker";
 };
 
 type MarketRow = {
@@ -314,6 +339,7 @@ type Trade = {
     finalPrice?: number;
     payout?: number;
     pnl?: number;
+    fee?: number;
     note?: string;
 };
 
@@ -348,9 +374,11 @@ function envNumber(name: string, fallback: number): number {
 function usage(): string {
     return [
         "Usage:",
-        "  npm run backtest:btc5m -- --strategy <edge|managed-edge|adaptive-edge|conditional-rebound|trend-pullback|sustained-high|latency-scalp|deep-rebound|extreme-020-rebound|range-mid-reversion|final-30-high|final-30-hedged|final-30-managed|undervalued-hold|undervalued-final-managed|dynamic-range-pullback|dynamic-range-final-managed|trend-range-switch|trend-range-regime|trend-range-overlay|adaptive-overlay|range-arb|market-maker|conditional-market-maker|hybrid> --csv <path>",
+        "  npm run backtest:btc5m -- --strategy <edge|managed-edge|adaptive-edge|conditional-rebound|trend-pullback|sustained-high|latency-scalp|deep-rebound|extreme-020-rebound|range-mid-reversion|final-30-high|final-30-hedged|final-30-managed|undervalued-hold|undervalued-final-managed|dynamic-range-pullback|dynamic-range-final-managed|trend-range-switch|trend-range-regime|trend-range-overlay|adaptive-overlay|range-arb|maker-range|market-maker|conditional-market-maker|hybrid> --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:edge --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:range-arb --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:maker-range --csv <path>",
+        "  npm run backtest:btc5m -- --strategy btc5m:reverse-touch-edge --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:market-maker --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:conditional-market-maker --csv <path>",
         "  npm run backtest:btc5m -- --strategy btc5m:managed-edge --csv <path>",
@@ -389,16 +417,22 @@ function usage(): string {
         "  --sustained-high-confirm <s>  Required continuous duration; default 10",
         "  --sustained-high-entry <p>    BUY limit after confirmation; default 0.90",
         "  --switch-failures <count>     Trend/range consecutive-loss threshold; default 2",
+        "  --fee-rate <number>          Taker fee charged on every fill; default BACKTEST_TAKER_FEE_RATE or 0.07",
+        "  --no-fees                    Disable fees (legacy gross backtest, ignores --fee-rate)",
+        "  --fill-mode <taker|maker>    Entry fill assumption; default BACKTEST_FILL_MODE or taker (applies to final-30-high)",
     ].join("\n");
 }
 
 function parseStrategy(value: string | undefined): BacktestStrategy {
     if (value === "edge" || value === "btc5m:edge") return "edge";
     if (value === "range-arb" || value === "btc5m:range-arb") return "range-arb";
+    if (value === "maker-range" || value === "btc5m:maker-range") return "maker-range";
+    if (value === "reverse-touch-edge" || value === "btc5m:reverse-touch-edge") return "reverse-touch-edge";
     if (value === "range-mid-reversion" || value === "btc5m:range-mid-reversion") return "range-mid-reversion";
     if (value === "conditional-rebound" || value === "btc5m:conditional-rebound") return "conditional-rebound";
     if (value === "market-maker" || value === "btc5m:market-maker") return "market-maker";
     if (value === "conditional-market-maker" || value === "btc5m:conditional-market-maker") return "conditional-market-maker";
+    if (value === "conditional-market-maker-v2" || value === "btc5m:conditional-market-maker-v2") return "conditional-market-maker-v2";
     if (value === "hybrid" || value === "btc5m:hybrid") return "hybrid";
     if (value === "managed-edge" || value === "btc5m:managed-edge") return "managed-edge";
     if (value === "adaptive-edge" || value === "btc5m:adaptive-edge") return "adaptive-edge";
@@ -431,9 +465,15 @@ function loadConfig(): BacktestConfig {
     const csvPath = getArgValue("--csv") ?? envString("BACKTEST_CSV", "");
     const strategy = parseStrategy(strategyArg);
     const finalManaged = strategy === "final-30-managed" || strategy === "undervalued-final-managed";
+    // Taker fee on every entry/exit. --no-fees (or --fee-rate 0) restores the legacy gross backtest.
+    const takerFeeRate = hasArg("--no-fees") ? 0 : Number(getArgValue("--fee-rate") ?? envNumber("BACKTEST_TAKER_FEE_RATE", 0.07));
+    const fillModeArg = (getArgValue("--fill-mode") ?? envString("BACKTEST_FILL_MODE", "taker")).toLowerCase();
+    const fillMode: "taker" | "maker" = fillModeArg === "maker" ? "maker" : "taker";
     const cfg: BacktestConfig = {
         strategy,
         csvPath,
+        takerFeeRate,
+        fillMode,
         outputTradesPath: getArgValue("--out") ?? envString("BACKTEST_TRADES_OUT", "logs/backtest-btc5m-trades.csv"),
         intervalMinutes: Number(getArgValue("--interval-minutes") ?? envNumber("BACKTEST_INTERVAL_MINUTES", envNumber("BTC5M_INTERVAL_MINUTES", 5))),
         volPerInterval: Number(getArgValue("--vol-per-interval") ?? envNumber("BACKTEST_VOL_PER_INTERVAL", 0.0015)),
@@ -442,10 +482,33 @@ function loadConfig(): BacktestConfig {
         edgeMinElapsedSeconds: Number(getArgValue("--edge-min-elapsed") ?? envNumber("BACKTEST_EDGE_MIN_ELAPSED_SECONDS", 0)),
         orderUsdc: Number(getArgValue("--order-usdc") ?? envNumber("BACKTEST_ORDER_USDC", 5)),
         maxUsdcPerLeg: Number(getArgValue("--max-usdc-per-leg") ?? envNumber("BACKTEST_MAX_USDC_PER_LEG", 10)),
-        minSecondsLeft: Number(getArgValue("--min-seconds-left") ?? ((strategy === "market-maker" || strategy === "conditional-market-maker") ? envNumber("MM_MIN_SECONDS_LEFT_TO_QUOTE", 45) : envNumber("BACKTEST_MIN_SECONDS_LEFT", 10))),
+        minSecondsLeft: Number(getArgValue("--min-seconds-left") ?? ((strategy === "market-maker" || strategy === "conditional-market-maker" || strategy === "conditional-market-maker-v2") ? envNumber("MM_MIN_SECONDS_LEFT_TO_QUOTE", 45) : envNumber("BACKTEST_MIN_SECONDS_LEFT", 10))),
         maxPrice: Number(getArgValue("--max-price") ?? envNumber("BACKTEST_MAX_PRICE", 0.98)),
         rangePriceX: Number(getArgValue("--range-price-x") ?? envNumber("RANGE_ARB_PRICE_X", 0.4)),
         rangeUsdcPerLeg: Number(getArgValue("--range-usdc-per-leg") ?? envNumber("RANGE_ARB_USDC_PER_LEG", 5)),
+        makerRangePrice: Number(getArgValue("--maker-range-price") ?? envNumber("MAKER_RANGE_PRICE", 0.4)),
+        makerRangeShares: Number(getArgValue("--maker-range-shares") ?? envNumber("MAKER_RANGE_ORDER_SHARES", 5)),
+        makerRangeMinSecondsLeftToOpen: Number(getArgValue("--maker-range-min-seconds-left") ?? envNumber("MAKER_RANGE_MIN_SECONDS_LEFT_TO_OPEN", 90)),
+        makerRangeForceExitSecondsLeft: Number(getArgValue("--maker-range-force-exit-seconds-left") ?? envNumber("MAKER_RANGE_FORCE_EXIT_SECONDS_LEFT", 60)),
+        makerRangeMaxUnpairedSeconds: Number(getArgValue("--maker-range-max-unpaired-seconds") ?? envNumber("MAKER_RANGE_MAX_UNPAIRED_SECONDS", 45)),
+        makerRangeStopLossDelta: Number(getArgValue("--maker-range-stop-loss-delta") ?? envNumber("MAKER_RANGE_STOP_LOSS_DELTA", 0.10)),
+        makerRangeTakerFeeRate: Number(getArgValue("--maker-range-taker-fee-rate") ?? envNumber("MAKER_RANGE_TAKER_FEE_RATE", 0.07)),
+        makerRangeRebateRate: Number(getArgValue("--maker-range-rebate-rate") ?? envNumber("MAKER_RANGE_REBATE_RATE", 0.20)),
+        reverseTouchParams: {
+            intervalMinutes: envNumber("REVERSE_TOUCH_EDGE_INTERVAL_MINUTES", 5),
+            volPerInterval: Number(getArgValue("--reverse-vol-per-interval") ?? envNumber("REVERSE_TOUCH_EDGE_VOL_PER_INTERVAL", 0.0015)),
+            triggerPrice: Number(getArgValue("--reverse-trigger-price") ?? envNumber("REVERSE_TOUCH_EDGE_TRIGGER_PRICE", 0.40)),
+            triggerResetPrice: Number(getArgValue("--reverse-trigger-reset-price") ?? envNumber("REVERSE_TOUCH_EDGE_TRIGGER_RESET_PRICE", 0.45)),
+            minEntryPrice: Number(getArgValue("--reverse-min-entry-price") ?? envNumber("REVERSE_TOUCH_EDGE_MIN_ENTRY_PRICE", 0.50)),
+            maxEntryPrice: Number(getArgValue("--reverse-max-entry-price") ?? envNumber("REVERSE_TOUCH_EDGE_MAX_ENTRY_PRICE", 0.66)),
+            minSecondsLeftToOpen: Number(getArgValue("--reverse-min-seconds-left") ?? envNumber("REVERSE_TOUCH_EDGE_MIN_SECONDS_LEFT_TO_OPEN", 60)),
+            maxSecondsLeftToOpen: Number(getArgValue("--reverse-max-seconds-left") ?? envNumber("REVERSE_TOUCH_EDGE_MAX_SECONDS_LEFT_TO_OPEN", 240)),
+            confirmSeconds: Number(getArgValue("--reverse-confirm-seconds") ?? envNumber("REVERSE_TOUCH_EDGE_CONFIRM_SECONDS", 2)),
+            minDirectionalBtcMarginBps: Number(getArgValue("--reverse-min-btc-margin-bps") ?? envNumber("REVERSE_TOUCH_EDGE_MIN_BTC_MARGIN_BPS", 2)),
+            minEdge: Number(getArgValue("--reverse-min-edge") ?? envNumber("REVERSE_TOUCH_EDGE_MIN_EDGE", 0.10)),
+            maxSpread: Number(getArgValue("--reverse-max-spread") ?? envNumber("REVERSE_TOUCH_EDGE_MAX_SPREAD", 0.03)),
+            orderShares: Number(getArgValue("--reverse-shares") ?? envNumber("REVERSE_TOUCH_EDGE_ORDER_SHARES", 5)),
+        },
         rangeMidObserveSeconds: Number(getArgValue("--range-mid-observe-seconds") ?? envNumber("RANGE_MID_OBSERVE_SECONDS", 120)),
         rangeMidProfitDelta: Number(getArgValue("--range-mid-profit-delta") ?? envNumber("RANGE_MID_PROFIT_DELTA", 0.05)),
         rangeMidMaxHoldSeconds: Number(getArgValue("--range-mid-max-hold-seconds") ?? envNumber("RANGE_MID_MAX_HOLD_SECONDS", 15)),
@@ -470,8 +533,8 @@ function loadConfig(): BacktestConfig {
         marketMakerQuoteSpread: Number(getArgValue("--mm-quote-spread") ?? envNumber("MM_QUOTE_SPREAD", 0.06)),
         marketMakerMinLockedEdge: Number(getArgValue("--mm-min-locked-edge") ?? envNumber("MM_MIN_LOCKED_EDGE", 0.02)),
         marketMakerInventorySkewPerShare: Number(getArgValue("--mm-inventory-skew-per-share") ?? envNumber("MM_INVENTORY_SKEW_PER_SHARE", 0.002)),
-        marketMakerMaxUsdcPerLeg: Number(getArgValue("--mm-max-usdc-per-leg") ?? (strategy === "conditional-market-maker" ? envNumber("CONDITIONAL_MM_MAX_USDC_PER_LEG", 5) : envNumber("MM_MAX_USDC_PER_LEG", 0))),
-        marketMakerMaxInventoryShares: Number(getArgValue("--mm-max-inventory-shares") ?? (strategy === "conditional-market-maker" ? envNumber("CONDITIONAL_MM_MAX_INVENTORY_SHARES", 10) : envNumber("MM_MAX_INVENTORY_SHARES", 30))),
+        marketMakerMaxUsdcPerLeg: Number(getArgValue("--mm-max-usdc-per-leg") ?? ((strategy === "conditional-market-maker" || strategy === "conditional-market-maker-v2") ? envNumber("CONDITIONAL_MM_MAX_USDC_PER_LEG", 5) : envNumber("MM_MAX_USDC_PER_LEG", 0))),
+        marketMakerMaxInventoryShares: Number(getArgValue("--mm-max-inventory-shares") ?? ((strategy === "conditional-market-maker" || strategy === "conditional-market-maker-v2") ? envNumber("CONDITIONAL_MM_MAX_INVENTORY_SHARES", 10) : envNumber("MM_MAX_INVENTORY_SHARES", 30))),
         marketMakerCancelSecondsBeforeEnd: Number(getArgValue("--mm-cancel-seconds-before-end") ?? envNumber("MM_CANCEL_SECONDS_BEFORE_END", 8)),
         conditionalMmLookbackSeconds: Number(getArgValue("--cmm-lookback") ?? envNumber("CONDITIONAL_MM_LOOKBACK_SECONDS", 15)),
         conditionalMmAccelerationLookbackSeconds: Number(getArgValue("--cmm-acceleration-lookback") ?? envNumber("CONDITIONAL_MM_ACCELERATION_LOOKBACK_SECONDS", 2)),
@@ -479,12 +542,12 @@ function loadConfig(): BacktestConfig {
         conditionalMmMaxTrendBps: Number(getArgValue("--cmm-max-trend-bps") ?? envNumber("CONDITIONAL_MM_MAX_TREND_BPS", 8)),
         conditionalMmMaxTrendEfficiency: Number(getArgValue("--cmm-max-trend-efficiency") ?? envNumber("CONDITIONAL_MM_MAX_TREND_EFFICIENCY", 0.65)),
         conditionalMmTrendEfficiencyMinMomentumBps: Number(getArgValue("--cmm-trend-efficiency-min-momentum-bps") ?? envNumber("CONDITIONAL_MM_TREND_EFFICIENCY_MIN_MOMENTUM_BPS", 2)),
-        conditionalMmMaxAccelerationBps: Number(getArgValue("--cmm-max-acceleration-bps") ?? envNumber("CONDITIONAL_MM_MAX_ACCELERATION_BPS", 4)),
+        conditionalMmMaxAccelerationBps: Number(getArgValue("--cmm-max-acceleration-bps") ?? envNumber("CONDITIONAL_MM_MAX_ACCELERATION_BPS", strategy === "conditional-market-maker-v2" ? 3 : 4)),
         conditionalMmDirectionMinMomentumBps: Number(getArgValue("--cmm-direction-min-momentum-bps") ?? envNumber("CONDITIONAL_MM_DIRECTION_MIN_MOMENTUM_BPS", 999)),
-        conditionalMmFavoredPriceImprove: Number(getArgValue("--cmm-favored-price-improve") ?? envNumber("CONDITIONAL_MM_FAVORED_PRICE_IMPROVE", 0)),
-        conditionalMmUnfavoredPriceOffset: Number(getArgValue("--cmm-unfavored-price-offset") ?? envNumber("CONDITIONAL_MM_UNFAVORED_PRICE_OFFSET", 0)),
-        conditionalMmFavoredSizeMultiplier: Number(getArgValue("--cmm-favored-size-multiplier") ?? envNumber("CONDITIONAL_MM_FAVORED_SIZE_MULTIPLIER", 1)),
-        conditionalMmUnfavoredSizeMultiplier: Number(getArgValue("--cmm-unfavored-size-multiplier") ?? envNumber("CONDITIONAL_MM_UNFAVORED_SIZE_MULTIPLIER", 1)),
+        conditionalMmFavoredPriceImprove: Number(getArgValue("--cmm-favored-price-improve") ?? envNumber("CONDITIONAL_MM_FAVORED_PRICE_IMPROVE", strategy === "conditional-market-maker-v2" ? 0.01 : 0)),
+        conditionalMmUnfavoredPriceOffset: Number(getArgValue("--cmm-unfavored-price-offset") ?? envNumber("CONDITIONAL_MM_UNFAVORED_PRICE_OFFSET", strategy === "conditional-market-maker-v2" ? 0.02 : 0)),
+        conditionalMmFavoredSizeMultiplier: Number(getArgValue("--cmm-favored-size-multiplier") ?? envNumber("CONDITIONAL_MM_FAVORED_SIZE_MULTIPLIER", strategy === "conditional-market-maker-v2" ? 1.5 : 1)),
+        conditionalMmUnfavoredSizeMultiplier: Number(getArgValue("--cmm-unfavored-size-multiplier") ?? envNumber("CONDITIONAL_MM_UNFAVORED_SIZE_MULTIPLIER", strategy === "conditional-market-maker-v2" ? 0.5 : 1)),
         conditionalMmMaxNetInventoryShares: Number(getArgValue("--cmm-max-net-inventory-shares") ?? envNumber("CONDITIONAL_MM_MAX_NET_INVENTORY_SHARES", 5)),
         conditionalMmMinOrderUsdc: Number(getArgValue("--cmm-min-order-usdc") ?? envNumber("CONDITIONAL_MM_MIN_ORDER_USDC", 1)),
         conditionalMmMinOrderShares: Number(getArgValue("--cmm-min-order-shares") ?? envNumber("CONDITIONAL_MM_MIN_ORDER_SHARES", 5)),
@@ -492,6 +555,10 @@ function loadConfig(): BacktestConfig {
         conditionalMmForceFlattenSecondsBeforeEnd: Number(getArgValue("--cmm-force-flatten-seconds") ?? envNumber("CONDITIONAL_MM_FORCE_FLATTEN_SECONDS_BEFORE_END", 15)),
         conditionalMmMaxUnpairedSeconds: Number(getArgValue("--cmm-max-unpaired-seconds") ?? envNumber("CONDITIONAL_MM_MAX_UNPAIRED_SECONDS", 5)),
         conditionalMmPairOrderMaxAgeSeconds: Number(getArgValue("--cmm-pair-order-max-age-seconds") ?? envNumber("CONDITIONAL_MM_PAIR_ORDER_MAX_AGE_SECONDS", 30)),
+        conditionalMmV2MinBidPrice: Number(getArgValue("--cmm-v2-min-bid-price") ?? envNumber("CONDITIONAL_MM_V2_MIN_BID_PRICE", 0.10)),
+        conditionalMmV2MaxBidPrice: Number(getArgValue("--cmm-v2-max-bid-price") ?? envNumber("CONDITIONAL_MM_V2_MAX_BID_PRICE", 0.55)),
+        conditionalMmV2MinSecondsLeftToBuy: Number(getArgValue("--cmm-v2-min-seconds-left") ?? envNumber("CONDITIONAL_MM_V2_MIN_SECONDS_LEFT", 60)),
+        conditionalMmV2BuyLegsOnly: (getArgValue("--cmm-v2-buy-legs-only") ?? envString("CONDITIONAL_MM_V2_BUY_LEGS_ONLY", "DOWN")) as "BOTH" | "UP" | "DOWN",
         // Hybrid params
         hybridLookbackSeconds: Number(getArgValue("--hybrid-lookback") ?? envNumber("HYBRID_LOOKBACK_SECONDS", 60)),
         hybridOscillationThreshold: Number(getArgValue("--hybrid-osc-threshold") ?? envNumber("HYBRID_OSC_THRESHOLD", 2)),
@@ -638,9 +705,14 @@ function loadConfig(): BacktestConfig {
         final30ManagedNightMinDirectionalMarginBps: Number(getArgValue("--final-30-managed-night-min-btc-margin-bps") ?? envNumber("FINAL_30_MANAGED_NIGHT_MIN_BTC_MARGIN_BPS", 1)),
         final30ManagedTakeProfitDelta: Number(getArgValue("--final-30-managed-take-profit-delta") ?? envNumber("FINAL_30_MANAGED_TAKE_PROFIT_DELTA", 0)),
         final30ManagedStopLossDelta: Number(getArgValue("--final-30-managed-stop-loss-delta") ?? envNumber("FINAL_30_MANAGED_STOP_LOSS_DELTA", 0.10)),
+        final30ManagedStopLossPrice: Number(getArgValue("--final-30-managed-stop-loss-price") ?? envNumber("FINAL_30_MANAGED_STOP_LOSS_PRICE", 0)),
         final30ManagedStopMinBtcReversalBps: Number(getArgValue("--final-30-managed-stop-min-btc-reversal-bps") ?? envNumber("FINAL_30_MANAGED_STOP_MIN_BTC_REVERSAL_BPS", 2)),
         final30ManagedStopConfirmSeconds: Number(getArgValue("--final-30-managed-stop-confirm-seconds") ?? envNumber("FINAL_30_MANAGED_STOP_CONFIRM_SECONDS", 2)),
         final30ManagedStopMaxDirectionalMarginBps: Number(getArgValue("--final-30-managed-stop-max-margin-bps") ?? envNumber("FINAL_30_MANAGED_STOP_MAX_DIRECTIONAL_MARGIN_BPS", 999)),
+        final30ManagedEntryVelocityLookbackSeconds: Number(getArgValue("--final-30-managed-entry-vel-lookback-seconds") ?? envNumber("FINAL_30_MANAGED_ENTRY_VEL_LOOKBACK_SECONDS", 0)),
+        final30ManagedEntryMinBtcVelocityBpsPerSec: Number(getArgValue("--final-30-managed-entry-min-btc-vel-bps-per-sec") ?? envNumber("FINAL_30_MANAGED_ENTRY_MIN_BTC_VEL_BPS_PER_SEC", 0)),
+        final30ManagedEntryAccelerationLookbackSeconds: Number(getArgValue("--final-30-managed-entry-accel-lookback-seconds") ?? envNumber("FINAL_30_MANAGED_ENTRY_ACCEL_LOOKBACK_SECONDS", 0)),
+        final30ManagedEntryMinBtcAccelerationBpsPerSec2: Number(getArgValue("--final-30-managed-entry-min-btc-accel-bps-per-sec2") ?? envNumber("FINAL_30_MANAGED_ENTRY_MIN_BTC_ACCEL_BPS_PER_SEC2", 0)),
         undervaluedHoldMinEntryPrice: Number(getArgValue("--undervalued-hold-min-entry") ?? envNumber("UNDERVALUED_HOLD_MIN_ENTRY_PRICE", 0.30)),
         undervaluedHoldMaxEntryPrice: Number(getArgValue("--undervalued-hold-max-entry") ?? envNumber("UNDERVALUED_HOLD_MAX_ENTRY_PRICE", 0.60)),
         undervaluedHoldOrderShares: Number(getArgValue("--undervalued-hold-shares") ?? envNumber("UNDERVALUED_HOLD_ORDER_SHARES", 5)),
@@ -701,6 +773,9 @@ function loadConfig(): BacktestConfig {
     if (!(cfg.maxPrice > 0 && cfg.maxPrice <= 1)) throw new Error("BACKTEST_MAX_PRICE must be > 0 and <= 1");
     if (!(cfg.rangePriceX > 0 && cfg.rangePriceX < 1)) throw new Error("RANGE_ARB_PRICE_X must be > 0 and < 1");
     if (cfg.rangeUsdcPerLeg <= 0) throw new Error("RANGE_ARB_USDC_PER_LEG must be > 0");
+    if (!(cfg.makerRangePrice > 0 && cfg.makerRangePrice < 0.5) || cfg.makerRangeShares < 5 || cfg.makerRangeMinSecondsLeftToOpen <= cfg.makerRangeForceExitSecondsLeft || cfg.makerRangeForceExitSecondsLeft < 0 || cfg.makerRangeMaxUnpairedSeconds <= 0 || !(cfg.makerRangeStopLossDelta > 0 && cfg.makerRangeStopLossDelta < cfg.makerRangePrice) || cfg.makerRangeTakerFeeRate < 0 || !(cfg.makerRangeRebateRate >= 0 && cfg.makerRangeRebateRate <= 1)) throw new Error("Invalid maker-range parameters");
+    const reverse = cfg.reverseTouchParams;
+    if (!(reverse.triggerPrice > 0 && reverse.triggerPrice < 0.5) || reverse.triggerResetPrice < reverse.triggerPrice || !(reverse.minEntryPrice > reverse.triggerPrice && reverse.minEntryPrice < reverse.maxEntryPrice && reverse.maxEntryPrice < 1) || reverse.minSecondsLeftToOpen < 0 || reverse.maxSecondsLeftToOpen <= reverse.minSecondsLeftToOpen || reverse.confirmSeconds < 0 || reverse.minDirectionalBtcMarginBps < 0 || reverse.minEdge < 0 || reverse.maxSpread < 0 || reverse.orderShares < 5 || reverse.volPerInterval <= 0) throw new Error("Invalid reverse-touch-edge parameters");
     if (cfg.rangeMidObserveSeconds <= 0 || !(cfg.rangeMidProfitDelta > 0 && cfg.rangeMidProfitDelta < 1) || cfg.rangeMidMaxHoldSeconds <= 0 || cfg.rangeMidForceExitSecondsLeft < 0 || cfg.rangeMidMinSecondsLeftToOpen < cfg.rangeMidForceExitSecondsLeft || cfg.rangeMidMinMidCrosses < 0 || cfg.rangeMidShares <= 0) throw new Error("Invalid range-mid-reversion parameters");
     if (!(cfg.conditionalReboundTrainRatio > 0 && cfg.conditionalReboundTrainRatio < 1) || cfg.conditionalReboundLookbackSeconds <= 0 || cfg.conditionalReboundHorizonSeconds <= 0 || cfg.conditionalReboundSampleIntervalSeconds <= 0 || cfg.conditionalReboundTakeProfitDelta <= 0 || cfg.conditionalReboundStopLossDelta <= 0 || !(cfg.conditionalReboundMinProbability > 0 && cfg.conditionalReboundMinProbability < 1) || cfg.conditionalReboundMinExpectedPnl < 0 || cfg.conditionalReboundShares <= 0 || cfg.conditionalReboundMinSecondsLeft < 0 || cfg.conditionalReboundMaxSecondsLeft <= cfg.conditionalReboundMinSecondsLeft || cfg.conditionalReboundMinAsk <= 0 || cfg.conditionalReboundMaxAsk >= 1 || cfg.conditionalReboundMaxAsk <= cfg.conditionalReboundMinAsk) throw new Error("Invalid conditional-rebound parameters");
     if (cfg.marketMakerQuoteShares <= 0) throw new Error("MM_QUOTE_SHARES must be > 0");
@@ -712,7 +787,7 @@ function loadConfig(): BacktestConfig {
     if (cfg.conditionalMmLookbackSeconds <= 0 || cfg.conditionalMmAccelerationLookbackSeconds <= 0 || cfg.conditionalMmAccelerationLookbackSeconds > cfg.conditionalMmLookbackSeconds) throw new Error("Invalid conditional market-maker lookback");
     if (cfg.conditionalMmMaxRangeBps <= 0 || cfg.conditionalMmMaxTrendBps <= 0 || cfg.conditionalMmMaxAccelerationBps <= 0 || cfg.conditionalMmTrendEfficiencyMinMomentumBps < 0 || cfg.conditionalMmDirectionMinMomentumBps < 0) throw new Error("Invalid conditional market-maker BTC thresholds");
     if (!(cfg.conditionalMmMaxTrendEfficiency > 0 && cfg.conditionalMmMaxTrendEfficiency <= 1)) throw new Error("CONDITIONAL_MM_MAX_TREND_EFFICIENCY must be between 0 and 1");
-    if (cfg.conditionalMmFavoredPriceImprove < 0 || cfg.conditionalMmUnfavoredPriceOffset < 0 || cfg.conditionalMmFavoredSizeMultiplier <= 0 || cfg.conditionalMmUnfavoredSizeMultiplier <= 0 || cfg.conditionalMmMaxNetInventoryShares <= 0 || cfg.conditionalMmMinOrderUsdc <= 0 || (cfg.strategy === "conditional-market-maker" && cfg.conditionalMmMinOrderUsdc > cfg.marketMakerMaxUsdcPerLeg) || cfg.conditionalMmMinOrderShares <= 0 || cfg.conditionalMmMinSellProfit < 0 || cfg.marketMakerCancelSecondsBeforeEnd < 0 || cfg.conditionalMmForceFlattenSecondsBeforeEnd <= cfg.marketMakerCancelSecondsBeforeEnd || cfg.conditionalMmMaxUnpairedSeconds <= 0 || cfg.conditionalMmPairOrderMaxAgeSeconds <= 0) throw new Error("Invalid conditional market-maker skew, inventory, or order-size parameters");
+    if (cfg.conditionalMmFavoredPriceImprove < 0 || cfg.conditionalMmUnfavoredPriceOffset < 0 || cfg.conditionalMmFavoredSizeMultiplier <= 0 || cfg.conditionalMmUnfavoredSizeMultiplier <= 0 || cfg.conditionalMmMaxNetInventoryShares <= 0 || cfg.conditionalMmMinOrderUsdc <= 0 || ((cfg.strategy === "conditional-market-maker" || cfg.strategy === "conditional-market-maker-v2") && cfg.conditionalMmMinOrderUsdc > cfg.marketMakerMaxUsdcPerLeg) || cfg.conditionalMmMinOrderShares <= 0 || cfg.conditionalMmMinSellProfit < 0 || cfg.marketMakerCancelSecondsBeforeEnd < 0 || cfg.conditionalMmForceFlattenSecondsBeforeEnd <= cfg.marketMakerCancelSecondsBeforeEnd || cfg.conditionalMmMaxUnpairedSeconds <= 0 || cfg.conditionalMmPairOrderMaxAgeSeconds <= 0) throw new Error("Invalid conditional market-maker skew, inventory, or order-size parameters");
     if (cfg.managedMinSecondsLeftToOpen < 0) throw new Error("MANAGED_EDGE_MIN_SECONDS_LEFT_TO_OPEN must be >= 0");
     if (cfg.managedMaxSecondsLeftToOpen < cfg.managedMinSecondsLeftToOpen) throw new Error("MANAGED_EDGE_MAX_SECONDS_LEFT_TO_OPEN must be >= MANAGED_EDGE_MIN_SECONDS_LEFT_TO_OPEN");
     if (cfg.managedNoCheapBuySecondsLeft < 0) throw new Error("MANAGED_EDGE_NO_CHEAP_BUY_SECONDS_LEFT must be >= 0");
@@ -774,12 +849,14 @@ function loadConfig(): BacktestConfig {
     if (!(cfg.final30HighTriggerPrice > 0.5 && cfg.final30HighTriggerPrice < 1 && cfg.final30HighEarlyTriggerPrice >= cfg.final30HighTriggerPrice && cfg.final30HighEarlyTriggerPrice <= cfg.final30HighMaxEntryPrice && cfg.final30HighMaxEntryPrice < 1) || cfg.final30HighOrderShares <= 0) throw new Error("Invalid final-30-high price or size");
     if (cfg.final30HighMinSecondsLeftToOpen < 0 || cfg.final30HighMaxSecondsLeftToOpen <= cfg.final30HighMinSecondsLeftToOpen || cfg.final30HighEarlyMaxSecondsLeftToOpen < cfg.final30HighMaxSecondsLeftToOpen) throw new Error("Invalid final-30-high entry window");
     if (!(cfg.final30HedgedMaxPairCost > 0 && cfg.final30HedgedMaxPairCost < 1)) throw new Error("FINAL_30_HEDGED_MAX_PAIR_COST must be between 0 and 1");
-    if (cfg.final30ManagedEarlyBtcMinMoveUsd < 0 || cfg.final30ManagedEarlyBtcMinAsk <= 0.5 || cfg.final30ManagedEarlyBtcMinAsk > cfg.final30HighMaxEntryPrice || cfg.final30ManagedEarlyBtcMaxSecondsLeft <= cfg.final30HighMaxSecondsLeftToOpen || cfg.final30ManagedTrendAtrLookbackSeconds <= 0 || cfg.final30ManagedTrendMinGapSafety < 0 || cfg.final30ManagedTrendMinPeakGapRatio < 0 || cfg.final30ManagedTrendMinPeakGapRatio > 1 || cfg.final30ManagedTrendMaxSpread < 0 || !Number.isInteger(cfg.final30ManagedTimezoneOffsetHours) || cfg.final30ManagedTimezoneOffsetHours < -23 || cfg.final30ManagedTimezoneOffsetHours > 23 || !Number.isInteger(cfg.final30ManagedDayStartHour) || cfg.final30ManagedDayStartHour < 0 || cfg.final30ManagedDayStartHour > 23 || !Number.isInteger(cfg.final30ManagedDayEndHour) || cfg.final30ManagedDayEndHour < 0 || cfg.final30ManagedDayEndHour > 23 || cfg.final30ManagedDayStartHour === cfg.final30ManagedDayEndHour || cfg.final30ManagedDayMinDirectionalMarginBps < 0 || cfg.final30ManagedNightMinDirectionalMarginBps < 0) throw new Error("Invalid final-30-managed early BTC configuration");
-    if (!(cfg.final30ManagedTakeProfitDelta >= 0 && cfg.final30ManagedTakeProfitDelta < 1) || !(cfg.final30ManagedStopLossDelta >= 0 && cfg.final30ManagedStopLossDelta < 1)) throw new Error("Invalid final-30-managed exit deltas");
-    if (cfg.final30ManagedStopMinBtcReversalBps < 0 || cfg.final30ManagedStopConfirmSeconds < 0 || cfg.final30ManagedStopMaxDirectionalMarginBps < 0) throw new Error("Invalid final-30-managed BTC stop confirmation");
+    if (cfg.final30ManagedEarlyBtcMinMoveUsd < 0 || cfg.final30ManagedEarlyBtcMinAsk <= 0.5 || cfg.final30ManagedEarlyBtcMinAsk > cfg.final30HighMaxEntryPrice || cfg.final30ManagedEarlyBtcMaxSecondsLeft <= cfg.final30HighMaxSecondsLeftToOpen || cfg.final30ManagedTrendAtrLookbackSeconds <= 0 || cfg.final30ManagedTrendMinGapSafety < 0 || cfg.final30ManagedTrendMinPeakGapRatio < 0 || cfg.final30ManagedTrendMinPeakGapRatio > 1 || cfg.final30ManagedTrendMaxSpread < 0 || !Number.isInteger(cfg.final30ManagedTimezoneOffsetHours) || cfg.final30ManagedTimezoneOffsetHours < -23 || cfg.final30ManagedTimezoneOffsetHours > 23 || !Number.isInteger(cfg.final30ManagedDayStartHour) || cfg.final30ManagedDayStartHour < 0 || cfg.final30ManagedDayStartHour > 23 || !Number.isInteger(cfg.final30ManagedDayEndHour) || cfg.final30ManagedDayEndHour < 0 || cfg.final30ManagedDayEndHour > 23 || cfg.final30ManagedDayStartHour === cfg.final30ManagedDayEndHour || cfg.final30ManagedDayMinDirectionalMarginBps < 0 || cfg.final30ManagedNightMinDirectionalMarginBps < 0 || cfg.final30ManagedEntryVelocityLookbackSeconds < 0 || cfg.final30ManagedEntryMinBtcVelocityBpsPerSec < 0 || cfg.final30ManagedEntryAccelerationLookbackSeconds < 0 || cfg.final30ManagedEntryMinBtcAccelerationBpsPerSec2 < 0) throw new Error("Invalid final-30-managed early BTC configuration");
+    if (!(cfg.final30ManagedTakeProfitDelta >= 0 && cfg.final30ManagedTakeProfitDelta < 1) || !(cfg.final30ManagedStopLossDelta >= 0 && cfg.final30ManagedStopLossDelta < 1) || !(cfg.final30ManagedStopLossPrice >= 0 && cfg.final30ManagedStopLossPrice < 1)) throw new Error("Invalid final-30-managed exit deltas");
+    if (cfg.final30ManagedStopMinBtcReversalBps < -1000 || cfg.final30ManagedStopConfirmSeconds < 0 || cfg.final30ManagedStopMaxDirectionalMarginBps < 0) throw new Error("Invalid final-30-managed BTC stop confirmation");
     if (!(cfg.undervaluedHoldMinEntryPrice > 0 && cfg.undervaluedHoldMinEntryPrice < cfg.undervaluedHoldMaxEntryPrice && cfg.undervaluedHoldMaxEntryPrice < 1) || cfg.undervaluedHoldOrderShares <= 0 || cfg.undervaluedHoldMinSecondsLeftToOpen < 0 || cfg.undervaluedHoldMaxSecondsLeftToOpen <= cfg.undervaluedHoldMinSecondsLeftToOpen || cfg.undervaluedHoldMinBtcMarginBps <= 0 || cfg.undervaluedHoldMinEdge < 0 || cfg.undervaluedHoldVolatilityLookbackSeconds <= 0 || cfg.undervaluedHoldVolatilityMinSamples < 2 || !(cfg.undervaluedHoldMinVolPerInterval > 0 && cfg.undervaluedHoldMinVolPerInterval <= cfg.undervaluedHoldMaxVolPerInterval) || cfg.undervaluedHoldMaxSpread < 0 || cfg.undervaluedHoldStabilizationLookbackSeconds < 0 || cfg.undervaluedHoldStabilizationMaxDrop < 0 || cfg.undervaluedHoldStabilizationMinRecovery < 0 || cfg.undervaluedHoldStabilizationStableSeconds < 0 || cfg.undervaluedHoldStabilizationStableRange < 0 || cfg.undervaluedHoldBtcConfirmSeconds < 0 || cfg.undervaluedHoldTakeProfitMinDelta < 0 || cfg.undervaluedHoldTakeProfitMaxRemainingEdge < 0 || !(cfg.undervaluedHoldStopLossPct >= 0 && cfg.undervaluedHoldStopLossPct < 1)) throw new Error("Invalid undervalued-hold configuration");
     const dynamic = cfg.dynamicRangePullbackParams;
     if (!(dynamic.minContractPullback > 0 && dynamic.minContractPullback < 1) || dynamic.minOrderNotional <= 0 || dynamic.orderShares <= 0 || dynamic.maxPairUsdc < dynamic.minOrderNotional * 2 || dynamic.minLockedProfit < 0 || dynamic.shareStep <= 0 || dynamic.minSecondsLeftToOpen < 0 || dynamic.maxSecondsLeftToOpen <= dynamic.minSecondsLeftToOpen || dynamic.minDirectionalBtcMarginBps < 0 || dynamic.maxBtcRetracementBps < 0 || dynamic.maxSpread <= 0 || dynamic.entryConfirmSeconds < 0 || !(dynamic.earlyPairCost > 0 && dynamic.earlyPairCost <= dynamic.middlePairCost && dynamic.middlePairCost <= dynamic.latePairCost && dynamic.latePairCost < 1) || !(dynamic.stopLossDelta > 0 && dynamic.stopLossDelta < 1) || dynamic.stopConfirmSeconds < 0 || dynamic.maxNakedSeconds < 0) throw new Error("Invalid dynamic-range-pullback configuration");
+    if (cfg.takerFeeRate < 0 || cfg.takerFeeRate >= 1) throw new Error("BACKTEST_TAKER_FEE_RATE must be in [0, 1)");
+    setBacktestTakerFeeRate(cfg.takerFeeRate);
     return cfg;
 }
 
@@ -991,7 +1068,7 @@ function settleCycles(cycles: Map<string, CycleState>): void {
             const wins = winner !== undefined && trade.leg === winner;
             trade.finalPrice = cycle.finalPrice;
             trade.payout = wins ? trade.shares : 0;
-            trade.pnl = trade.payout - trade.cost;
+            trade.pnl = trade.payout - trade.cost - (trade.fee ?? 0);
         }
     }
 }
@@ -1298,10 +1375,24 @@ function runFinal30HighBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycle
     const cycles = createCycleMap(rows, cfg);
     const entered = new Set<string>();
     const blocked = new Set<string>();
+    // maker mode: rest the limit and fill only when a LATER ask trades through it (matches the live GTC order).
+    const pending = new Map<string, { leg: Leg; price: number; size: number; fair?: number; edge?: number; note?: string }>();
     for (const row of rows) {
         const cycle = cycles.get(row.slug)!;
         updateWinner(cycle, row);
         if (row.rowType === "resolution") continue;
+        if (cfg.fillMode === "maker") {
+            const resting = pending.get(row.slug);
+            if (resting) {
+                const ask = resting.leg === "UP" ? row.upAsk : row.downAsk;
+                if (ask > 0 && ask <= resting.price + 1e-9) {
+                    buyAtPrice(cycle, row, resting.leg, resting.price, resting.price * resting.size, resting.fair, resting.edge, `${resting.note ?? "final-30-high"} [maker]`);
+                    entered.add(row.slug);
+                    pending.delete(row.slug);
+                }
+                continue;
+            }
+        }
         const decision = buildBtc5mFinal30HighOrders({
             timestampMs: row.timestampMs,
             endMs: cycle.endMs,
@@ -1323,14 +1414,18 @@ function runFinal30HighBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycle
         if (!quote || quote.side !== "BUY") continue;
         const ask = quote.leg === "UP" ? row.upAsk : row.downAsk;
         if (ask <= 0 || ask >= 1 || ask < cfg.final30HighTriggerPrice) continue;
-        buyAtPrice(cycle, row, quote.leg, ask, ask * quote.size, quote.fair, quote.edge, quote.note);
-        entered.add(row.slug);
+        if (cfg.fillMode === "maker") {
+            pending.set(row.slug, { leg: quote.leg, price: ask, size: quote.size, fair: quote.fair, edge: quote.edge, note: quote.note });
+        } else {
+            buyAtPrice(cycle, row, quote.leg, ask, ask * quote.size, quote.fair, quote.edge, quote.note);
+            entered.add(row.slug);
+        }
     }
     settleCycles(cycles);
     const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
     const traded = cycleList.filter((cycle) => cycle.trades.length > 0);
     const winners = traded.filter((cycle) => cycle.trades.some((trade) => trade.pnl !== undefined && trade.pnl > 0)).length;
-    console.log(`Final-30-high: entries=${traded.length}, winners=${winners}, winRate=${traded.length ? (winners / traded.length * 100).toFixed(2) : "0.00"}%`);
+    console.log(`Final-30-high [fill=${cfg.fillMode}]: entries=${traded.length}, winners=${winners}, winRate=${traded.length ? (winners / traded.length * 100).toFixed(2) : "0.00"}%`);
     return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
 }
 
@@ -1618,9 +1713,14 @@ function final30ManagedParams(cfg: BacktestConfig) {
         nightMinDirectionalMarginBps: cfg.final30ManagedNightMinDirectionalMarginBps,
         takeProfitDelta: cfg.final30ManagedTakeProfitDelta,
         stopLossDelta: cfg.final30ManagedStopLossDelta,
+        stopLossPrice: cfg.final30ManagedStopLossPrice,
         stopMinBtcReversalBps: cfg.final30ManagedStopMinBtcReversalBps,
         stopConfirmSeconds: cfg.final30ManagedStopConfirmSeconds,
         stopMaxDirectionalMarginBps: cfg.final30ManagedStopMaxDirectionalMarginBps,
+        entryVelocityLookbackSeconds: cfg.final30ManagedEntryVelocityLookbackSeconds,
+        entryMinBtcVelocityBpsPerSec: cfg.final30ManagedEntryMinBtcVelocityBpsPerSec,
+        entryAccelerationLookbackSeconds: cfg.final30ManagedEntryAccelerationLookbackSeconds,
+        entryMinBtcAccelerationBpsPerSec2: cfg.final30ManagedEntryMinBtcAccelerationBpsPerSec2,
     };
 }
 
@@ -1821,6 +1921,158 @@ function runRangeArbBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: 
     return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
 }
 
+function runMakerRangeBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    type State = {
+        postedAtMs?: number;
+        firstFillAtMs?: number;
+        filledUp: boolean;
+        filledDown: boolean;
+        closed: boolean;
+    };
+    const cycles = createCycleMap(rows, cfg);
+    const states = new Map<string, State>();
+    let postedCycles = 0;
+    let makerFills = 0;
+    let pairedCycles = 0;
+    let stopLosses = 0;
+    let timeouts = 0;
+    let forceExits = 0;
+    let makerFeeEquivalent = 0;
+    let rebateEstimate = 0;
+    let takerFeeEstimate = 0;
+    const params = {
+        price: cfg.makerRangePrice,
+        shares: cfg.makerRangeShares,
+        maxUnpairedSeconds: cfg.makerRangeMaxUnpairedSeconds,
+        stopLossDelta: cfg.makerRangeStopLossDelta,
+        forceExitSecondsLeft: cfg.makerRangeForceExitSecondsLeft,
+        takerFeeRate: cfg.makerRangeTakerFeeRate,
+        makerRebateRate: cfg.makerRangeRebateRate,
+    };
+
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+        const secondsLeft = (cycle.endMs - row.timestampMs) / 1000;
+        let state = states.get(row.slug);
+        if (!state) {
+            state = { filledUp: false, filledDown: false, closed: false };
+            states.set(row.slug, state);
+        }
+        if (state.closed) continue;
+
+        if (state.postedAtMs === undefined) {
+            if (secondsLeft < cfg.makerRangeMinSecondsLeftToOpen) {
+                state.closed = true;
+                continue;
+            }
+            if (row.upAsk > cfg.makerRangePrice && row.downAsk > cfg.makerRangePrice) {
+                state.postedAtMs = row.timestampMs;
+                postedCycles++;
+            }
+            continue;
+        }
+
+        if (row.timestampMs <= state.postedAtMs) continue;
+        if (!state.filledUp && row.upAsk <= cfg.makerRangePrice) {
+            buyAtPrice(cycle, row, "UP", cfg.makerRangePrice, cfg.makerRangePrice * cfg.makerRangeShares, undefined, 1 - 2 * cfg.makerRangePrice, "maker-range maker fill");
+            state.filledUp = true;
+            state.firstFillAtMs ??= row.timestampMs;
+            makerFills++;
+            makerFeeEquivalent += polymarketFeeEquivalent(cfg.makerRangeShares, cfg.makerRangePrice, cfg.makerRangeTakerFeeRate);
+            rebateEstimate += estimatedMakerRebate(cfg.makerRangeShares, cfg.makerRangePrice, params);
+        }
+        if (!state.filledDown && row.downAsk <= cfg.makerRangePrice) {
+            buyAtPrice(cycle, row, "DOWN", cfg.makerRangePrice, cfg.makerRangePrice * cfg.makerRangeShares, undefined, 1 - 2 * cfg.makerRangePrice, "maker-range maker fill");
+            state.filledDown = true;
+            state.firstFillAtMs ??= row.timestampMs;
+            makerFills++;
+            makerFeeEquivalent += polymarketFeeEquivalent(cfg.makerRangeShares, cfg.makerRangePrice, cfg.makerRangeTakerFeeRate);
+            rebateEstimate += estimatedMakerRebate(cfg.makerRangeShares, cfg.makerRangePrice, params);
+        }
+        if (state.filledUp && state.filledDown) {
+            state.closed = true;
+            pairedCycles++;
+            continue;
+        }
+        if (!state.firstFillAtMs) continue;
+
+        const heldLeg: Leg = state.filledUp ? "UP" : "DOWN";
+        const heldBid = heldLeg === "UP" ? row.upBid : row.downBid;
+        const risk = evaluateBtc5mMakerRangeRisk({ heldLeg, heldBid, firstFillAtMs: state.firstFillAtMs, timestampMs: row.timestampMs, secondsLeft, params });
+        if (!risk.exit || heldBid === undefined || heldBid <= 0) continue;
+        sellAtPrice(cycle, row, heldLeg, heldBid, cfg.makerRangeShares, undefined, undefined, `maker-range taker ${risk.reason}`);
+        takerFeeEstimate += polymarketFeeEquivalent(cfg.makerRangeShares, heldBid, cfg.makerRangeTakerFeeRate);
+        if (risk.reason === "stop-loss") stopLosses++;
+        else if (risk.reason === "unpaired-timeout") timeouts++;
+        else forceExits++;
+        state.closed = true;
+    }
+
+    settleManagedCycles(cycles);
+    const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
+    const rawPnl = cycleList.reduce((sum, cycle) => sum + cycle.trades.reduce((cycleSum, trade) => cycleSum + (trade.payout ?? 0) - trade.cost, 0), 0);
+    console.log(`Maker-range: posted=${postedCycles}, makerFills=${makerFills}, paired=${pairedCycles}, pairRate=${makerFills ? (pairedCycles / Math.max(1, makerFills - pairedCycles) * 100).toFixed(2) : "0.00"}%, stopLosses=${stopLosses}, timeouts=${timeouts}, forceExits=${forceExits}`);
+    console.log(`Maker rebate estimate: feeEquivalent=${makerFeeEquivalent.toFixed(4)}, grossRebate≈${rebateEstimate.toFixed(4)}, takerExitFees≈${takerFeeEstimate.toFixed(4)}, adjustedPnL≈${(rawPnl + rebateEstimate - takerFeeEstimate).toFixed(4)} USDC`);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
+function runReverseTouchEdgeBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    const cycles = createCycleMap(rows, cfg);
+    const states = new Map<string, Btc5mReverseTouchEdgeState>();
+    const histories = new Map<string, Btc5mRegimeSnapshot[]>();
+    let signals = 0;
+    let entries = 0;
+    let edgeSum = 0;
+    let marginSum = 0;
+    let takerFeeEstimate = 0;
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+        const history = histories.get(row.slug) ?? [];
+        if (row.btcPrice !== undefined) {
+            history.push({ t: row.timestampMs, upAsk: row.upAsk, downAsk: row.downAsk, btcPrice: row.btcPrice });
+            histories.set(row.slug, history);
+        }
+        const state = states.get(row.slug) ?? {};
+        const decision = buildBtc5mReverseTouchEdgeOrders({
+            timestampMs: row.timestampMs,
+            endMs: cycle.endMs,
+            upAsk: row.upAsk,
+            downAsk: row.downAsk,
+            upBid: row.upBid,
+            downBid: row.downBid,
+            btcPrice: row.btcPrice,
+            openPrice: cycle.openPrice,
+            history,
+            state,
+            blocked: cycle.spentUp > 0 || cycle.spentDown > 0,
+            params: cfg.reverseTouchParams,
+        });
+        states.set(row.slug, decision.reverseState);
+        if (decision.reverseState.candidateLeg) signals++;
+        const quote = decision.quotes[0];
+        if (!quote || quote.side !== "BUY") continue;
+        buyAtPrice(cycle, row, quote.leg, quote.price, quote.price * quote.size, quote.fair, quote.edge, quote.note);
+        states.set(row.slug, { ...decision.reverseState, entered: true });
+        entries++;
+        edgeSum += quote.edge ?? 0;
+        takerFeeEstimate += polymarketFeeEquivalent(quote.size, quote.price, 0.07);
+        if (row.btcPrice !== undefined && cycle.openPrice !== undefined) {
+            const moveBps = (row.btcPrice / cycle.openPrice - 1) * 10_000;
+            marginSum += moveBps * (quote.leg === "UP" ? 1 : -1);
+        }
+    }
+    settleManagedCycles(cycles);
+    const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
+    console.log(`Reverse-touch-edge: candidateSamples=${signals}, entries=${entries}, avgEdge=${entries ? (edgeSum / entries).toFixed(3) : "0.000"}, avgBtcMargin=${entries ? (marginSum / entries).toFixed(2) : "0.00"}bps`);
+    const rawPnl = cycleList.reduce((sum, cycle) => sum + cycle.trades.reduce((cycleSum, trade) => cycleSum + (trade.payout ?? 0) - trade.cost, 0), 0);
+    console.log(`Fee estimate: marketable crypto BUY fees≈${takerFeeEstimate.toFixed(4)}, adjustedPnL≈${(rawPnl - takerFeeEstimate).toFixed(4)} USDC`);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
 function runRangePairBacktest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
     const cycles = createCycleMap(rows, cfg);
     const states = new Map<string, Btc5mRangePairState>();
@@ -1984,6 +2236,10 @@ function runConditionalMarketMakerBacktest(rows: MarketRow[], cfg: BacktestConfi
                 forceFlattenSecondsBeforeEnd: cfg.conditionalMmForceFlattenSecondsBeforeEnd,
                 maxUnpairedSeconds: cfg.conditionalMmMaxUnpairedSeconds,
                 pairOrderMaxAgeSeconds: cfg.conditionalMmPairOrderMaxAgeSeconds,
+                maxBidPrice: cfg.conditionalMmV2MaxBidPrice,
+                minBidPrice: cfg.conditionalMmV2MinBidPrice,
+                minSecondsLeftToBuy: cfg.conditionalMmV2MinSecondsLeftToBuy,
+                buyLegsOnly: cfg.conditionalMmV2BuyLegsOnly,
             },
             state: {
                 qUp: cycle.inventoryUp,
@@ -2016,6 +2272,97 @@ function runConditionalMarketMakerBacktest(rows: MarketRow[], cfg: BacktestConfi
     settleManagedCycles(cycles);
     const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
     console.log(`Conditional market maker: quotedRows=${quotedRows}, filteredRows=${filteredRows}, buyFills=${buyFills}, sellFills=${sellFills}`);
+    return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
+}
+
+function runConditionalMarketMakerV2Backtest(rows: MarketRow[], cfg: BacktestConfig): { cycles: CycleState[]; trades: Trade[] } {
+    const cycles = createCycleMap(rows, cfg);
+    const history = new Map<string, Btc5mConditionalMarketMakerSample[]>();
+    let buyFills = 0;
+    let sellFills = 0;
+    let filteredRows = 0;
+    for (const row of rows) {
+        const cycle = cycles.get(row.slug)!;
+        updateWinner(cycle, row);
+        if (row.rowType === "resolution") continue;
+        const secondsLeft = (cycle.endMs - row.timestampMs) / 1000;
+
+        const samples = history.get(row.slug) ?? [];
+        if (row.btcPrice !== undefined) samples.push({ timestampMs: row.timestampMs, btcPrice: row.btcPrice });
+        const cutoff = row.timestampMs - Math.max(cfg.conditionalMmLookbackSeconds, cfg.conditionalMmAccelerationLookbackSeconds) * 1000 - 2000;
+        while (samples.length && samples[0].timestampMs < cutoff) samples.shift();
+        history.set(row.slug, samples);
+
+        const decision = buildBtc5mConditionalMarketMakerV2Quotes({
+            timestampMs: row.timestampMs,
+            btcPrice: row.btcPrice,
+            history: samples,
+            up: { bestBid: row.upBid, bestAsk: row.upAsk, mid: row.upMid },
+            down: { bestBid: row.downBid, bestAsk: row.downAsk, mid: row.downMid },
+            secondsLeft,
+            params: {
+                quoteShares: cfg.marketMakerQuoteShares,
+                maxUsdcPerLeg: cfg.marketMakerMaxUsdcPerLeg,
+                maxInventoryShares: cfg.marketMakerMaxInventoryShares,
+                quoteSpread: cfg.marketMakerQuoteSpread,
+                minLockedEdge: cfg.marketMakerMinLockedEdge,
+                inventorySkewPerShare: cfg.marketMakerInventorySkewPerShare,
+                enableSellExcess: true,
+                minSecondsLeftToQuote: cfg.minSecondsLeft,
+                tick: 0.01,
+            },
+            conditionalParams: {
+                lookbackSeconds: cfg.conditionalMmLookbackSeconds,
+                accelerationLookbackSeconds: cfg.conditionalMmAccelerationLookbackSeconds,
+                maxRangeBps: cfg.conditionalMmMaxRangeBps,
+                maxTrendBps: cfg.conditionalMmMaxTrendBps,
+                maxTrendEfficiency: cfg.conditionalMmMaxTrendEfficiency,
+                trendEfficiencyMinMomentumBps: cfg.conditionalMmTrendEfficiencyMinMomentumBps,
+                maxAccelerationBps: cfg.conditionalMmMaxAccelerationBps,
+                directionMinMomentumBps: cfg.conditionalMmDirectionMinMomentumBps,
+                favoredPriceImprove: cfg.conditionalMmFavoredPriceImprove,
+                unfavoredPriceOffset: cfg.conditionalMmUnfavoredPriceOffset,
+                favoredSizeMultiplier: cfg.conditionalMmFavoredSizeMultiplier,
+                unfavoredSizeMultiplier: cfg.conditionalMmUnfavoredSizeMultiplier,
+                maxNetInventoryShares: cfg.conditionalMmMaxNetInventoryShares,
+                minOrderUsdc: cfg.conditionalMmMinOrderUsdc,
+                minOrderShares: cfg.conditionalMmMinOrderShares,
+                minSellProfit: cfg.conditionalMmMinSellProfit,
+                forceFlattenSecondsBeforeEnd: cfg.conditionalMmForceFlattenSecondsBeforeEnd,
+                maxUnpairedSeconds: cfg.conditionalMmMaxUnpairedSeconds,
+                pairOrderMaxAgeSeconds: cfg.conditionalMmPairOrderMaxAgeSeconds,
+                maxBidPrice: cfg.conditionalMmV2MaxBidPrice,
+                minBidPrice: cfg.conditionalMmV2MinBidPrice,
+                minSecondsLeftToBuy: cfg.conditionalMmV2MinSecondsLeftToBuy,
+                buyLegsOnly: cfg.conditionalMmV2BuyLegsOnly,
+            },
+            state: {
+                qUp: cycle.inventoryUp,
+                qDown: cycle.inventoryDown,
+                buyCostUp: cycle.spentUp,
+                buyCostDown: cycle.spentDown,
+                positionCostUp: cycle.costUp,
+                positionCostDown: cycle.costDown,
+                entryAttempted: false,
+                unpairedSinceMs: undefined,
+            },
+        });
+
+        // taker 语义：决策产生的单立即成交（BUY 用 ask，SELL 用 bid）。
+        for (const quote of decision.quotes) {
+            if (quote.side === "BUY") {
+                buyAtPrice(cycle, row, quote.leg, quote.price, quote.price * quote.size, quote.fair, quote.edge, `conditional-market-maker-v2 ${quote.note ?? "buy"}`);
+                buyFills++;
+            } else {
+                sellAtPrice(cycle, row, quote.leg, quote.price, quote.size, quote.fair, quote.edge, `conditional-market-maker-v2 ${quote.note ?? "sell"}`);
+                sellFills++;
+            }
+        }
+        if (!decision.quotes.length) filteredRows++;
+    }
+    settleManagedCycles(cycles);
+    const cycleList = Array.from(cycles.values()).sort((left, right) => left.startMs - right.startMs);
+    console.log(`Conditional market maker v2: buyFills=${buyFills}, sellFills=${sellFills}, filteredRows=${filteredRows}`);
     return { cycles: cycleList, trades: cycleList.flatMap((cycle) => cycle.trades) };
 }
 
@@ -2482,10 +2829,11 @@ function classifyTrendRangeCycle(rows: MarketRow[], cycle: CycleState, cfg: Back
     });
 }
 
-function cycleTradeTotals(cycle: CycleState): { cost: number; payout: number; pnl: number } {
+function cycleTradeTotals(cycle: CycleState): { cost: number; payout: number; fee: number; pnl: number } {
     const cost = cycle.trades.reduce((sum, trade) => sum + trade.cost, 0);
     const payout = cycle.trades.reduce((sum, trade) => sum + (trade.payout ?? 0), 0);
-    return { cost, payout, pnl: payout - cost };
+    const fee = cycle.trades.reduce((sum, trade) => sum + (trade.fee ?? 0), 0);
+    return { cost, payout, fee, pnl: payout - cost - fee };
 }
 
 function settleTrendPullbackCycles(cycles: Map<string, CycleState>): void {
@@ -2558,6 +2906,19 @@ function createCycleMap(rows: MarketRow[], cfg: BacktestConfig): Map<string, Cyc
     return cycles;
 }
 
+// Taker fee applied to every entry/exit fill. Set once from cfg in loadConfig().
+// Uses the same formula the live maker-range model uses so backtest and live agree.
+let ACTIVE_TAKER_FEE_RATE = 0;
+
+function setBacktestTakerFeeRate(rate: number): void {
+    ACTIVE_TAKER_FEE_RATE = Number.isFinite(rate) && rate > 0 ? rate : 0;
+}
+
+function tradeFee(shares: number, price: number): number {
+    if (ACTIVE_TAKER_FEE_RATE <= 0) return 0;
+    return polymarketFeeEquivalent(shares, price, ACTIVE_TAKER_FEE_RATE);
+}
+
 function buyAtPrice(cycle: CycleState, row: MarketRow, leg: Leg, price: number, cost: number, fair?: number, edge?: number, note?: string): void {
     const shares = cost / price;
     cycle.trades.push({
@@ -2571,6 +2932,7 @@ function buyAtPrice(cycle: CycleState, row: MarketRow, leg: Leg, price: number, 
         edge,
         openPrice: cycle.openPrice,
         btcPrice: row.btcPrice,
+        fee: tradeFee(shares, price),
         note,
     });
     if (leg === "UP") {
@@ -2589,6 +2951,7 @@ function sellAtPrice(cycle: CycleState, row: MarketRow, leg: Leg, price: number,
     const size = Math.min(shares, available);
     if (size <= 0) return;
     const proceeds = price * size;
+    const fee = tradeFee(size, price);
     cycle.trades.push({
         slug: cycle.slug,
         timestampMs: row.timestampMs,
@@ -2601,7 +2964,8 @@ function sellAtPrice(cycle: CycleState, row: MarketRow, leg: Leg, price: number,
         openPrice: cycle.openPrice,
         btcPrice: row.btcPrice,
         payout: proceeds,
-        pnl: proceeds,
+        pnl: proceeds - fee,
+        fee,
         note,
     });
     if (leg === "UP") {
@@ -2636,7 +3000,7 @@ function applyManagedQuotes(cycle: CycleState, row: MarketRow, quotes: Btc5mStra
 }
 
 function tradeCsv(trades: Trade[]): string {
-    const header = ["timestamp", "slug", "leg", "price", "shares", "cost", "fair", "edge", "openPrice", "btcPrice", "finalPrice", "payout", "pnl", "note"];
+    const header = ["timestamp", "slug", "leg", "price", "shares", "cost", "fair", "edge", "openPrice", "btcPrice", "finalPrice", "payout", "fee", "pnl", "note"];
     const lines = trades.map((trade) => [
         new Date(trade.timestampMs).toISOString(),
         trade.slug,
@@ -2650,6 +3014,7 @@ function tradeCsv(trades: Trade[]): string {
         formatOptional(trade.btcPrice, 2),
         formatOptional(trade.finalPrice, 2),
         (trade.payout ?? 0).toFixed(6),
+        (trade.fee ?? 0).toFixed(6),
         (trade.pnl ?? 0).toFixed(6),
         trade.note ?? "",
     ].join(","));
@@ -2663,7 +3028,9 @@ function formatOptional(value: number | undefined, decimals: number): string {
 function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig): void {
     const totalCost = trades.reduce((sum, trade) => sum + trade.cost, 0);
     const totalPayout = trades.reduce((sum, trade) => sum + (trade.payout ?? 0), 0);
-    const totalPnl = totalPayout - totalCost;
+    const totalFee = trades.reduce((sum, trade) => sum + (trade.fee ?? 0), 0);
+    const grossPnl = totalPayout - totalCost;
+    const totalPnl = grossPnl - totalFee;
     const winners = trades.filter((trade) => (trade.pnl ?? 0) > 0).length;
     const tradedCycles = cycles.filter((cycle) => cycle.trades.length > 0).length;
     const roi = totalCost > 0 ? totalPnl / totalCost : 0;
@@ -2671,28 +3038,27 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
     console.log("=== BTC 5m Backtest ===");
     console.log(`Strategy: ${cfg.strategy}`);
     console.log(`CSV: ${cfg.csvPath}`);
+    console.log(`Fees: takerFeeRate=${cfg.takerFeeRate} (feeEquivalent formula), settlement=0, fillMode=${cfg.fillMode}`);
     console.log(`Cycles: ${cycles.length}, traded cycles: ${tradedCycles}`);
-    if (cfg.strategy === "conditional-market-maker" || cfg.strategy === "range-mid-reversion" || cfg.strategy === "conditional-rebound" || cfg.strategy === "trend-pullback" || cfg.strategy === "sustained-high" || cfg.strategy === "latency-scalp" || cfg.strategy === "deep-rebound" || cfg.strategy === "extreme-020-rebound" || cfg.strategy === "final-30-high" || cfg.strategy === "final-30-hedged" || cfg.strategy === "final-30-managed" || cfg.strategy === "undervalued-hold" || cfg.strategy === "undervalued-final-managed" || cfg.strategy === "dynamic-range-pullback" || cfg.strategy === "dynamic-range-final-managed" || cfg.strategy === "trend-range-switch" || cfg.strategy === "trend-range-regime" || cfg.strategy === "trend-range-overlay" || cfg.strategy === "adaptive-overlay") {
+    if (cfg.strategy === "maker-range" || cfg.strategy === "reverse-touch-edge" || cfg.strategy === "conditional-market-maker" || cfg.strategy === "conditional-market-maker-v2" || cfg.strategy === "range-mid-reversion" || cfg.strategy === "conditional-rebound" || cfg.strategy === "trend-pullback" || cfg.strategy === "sustained-high" || cfg.strategy === "latency-scalp" || cfg.strategy === "deep-rebound" || cfg.strategy === "extreme-020-rebound" || cfg.strategy === "final-30-high" || cfg.strategy === "final-30-hedged" || cfg.strategy === "final-30-managed" || cfg.strategy === "undervalued-hold" || cfg.strategy === "undervalued-final-managed" || cfg.strategy === "dynamic-range-pullback" || cfg.strategy === "dynamic-range-final-managed" || cfg.strategy === "trend-range-switch" || cfg.strategy === "trend-range-regime" || cfg.strategy === "trend-range-overlay" || cfg.strategy === "adaptive-overlay") {
         const entries = trades.filter((trade) => trade.cost > 0);
         const profitableCycles = cycles.filter((cycle) => {
-            const cost = cycle.trades.reduce((sum, trade) => sum + trade.cost, 0);
-            const payout = cycle.trades.reduce((sum, trade) => sum + (trade.payout ?? 0), 0);
-            return cost > 0 && payout > cost;
+            const { cost, payout, fee } = cycleTradeTotals(cycle);
+            return cost > 0 && payout - fee > cost;
         }).length;
         console.log(`Entries: ${entries.length}, profitable cycles: ${profitableCycles}, cycle win rate: ${tradedCycles ? (profitableCycles / tradedCycles * 100).toFixed(2) : "0.00"}%`);
     } else {
         console.log(`Trades: ${trades.length}, winners: ${winners}, win rate: ${trades.length ? (winners / trades.length * 100).toFixed(2) : "0.00"}%`);
     }
-    console.log(`Cost: ${totalCost.toFixed(4)}, payout: ${totalPayout.toFixed(4)}, PnL: ${totalPnl.toFixed(4)}, ROI: ${(roi * 100).toFixed(2)}%`);
+    console.log(`Cost: ${totalCost.toFixed(4)}, payout: ${totalPayout.toFixed(4)}, fees: ${totalFee.toFixed(4)}, grossPnL: ${grossPnl.toFixed(4)}, netPnL: ${totalPnl.toFixed(4)}, netROI: ${(roi * 100).toFixed(2)}%`);
     let cumulativePnl = 0;
     let peakPnl = 0;
     let maxDrawdown = 0;
     let losingStreak = 0;
     let maxLosingStreak = 0;
     for (const cycle of cycles) {
-        const cycleCost = cycle.trades.reduce((sum, trade) => sum + trade.cost, 0);
-        const cyclePayout = cycle.trades.reduce((sum, trade) => sum + (trade.payout ?? 0), 0);
-        const cyclePnl = cyclePayout - cycleCost;
+        const { cost: cycleCost, payout: cyclePayout, fee: cycleFee } = cycleTradeTotals(cycle);
+        const cyclePnl = cyclePayout - cycleCost - cycleFee;
         cumulativePnl += cyclePnl;
         peakPnl = Math.max(peakPnl, cumulativePnl);
         maxDrawdown = Math.max(maxDrawdown, peakPnl - cumulativePnl);
@@ -2700,7 +3066,12 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
         maxLosingStreak = Math.max(maxLosingStreak, losingStreak);
     }
     console.log(`Risk: maxDrawdown=${maxDrawdown.toFixed(4)} USDC, maxConsecutiveLosingCycles=${maxLosingStreak}`);
-    if (cfg.strategy === "conditional-market-maker") {
+    if (cfg.strategy === "maker-range") {
+        console.log(`Params: postOnly=true, price=${cfg.makerRangePrice}, shares=${cfg.makerRangeShares}, minSecondsLeft=${cfg.makerRangeMinSecondsLeftToOpen}, maxUnpaired=${cfg.makerRangeMaxUnpairedSeconds}s, stopDelta=${cfg.makerRangeStopLossDelta}, forceExit=${cfg.makerRangeForceExitSecondsLeft}s, cryptoFeeRate=${cfg.makerRangeTakerFeeRate}, rebateRate=${cfg.makerRangeRebateRate}`);
+    } else if (cfg.strategy === "reverse-touch-edge") {
+        const params = cfg.reverseTouchParams;
+        console.log(`Params: trigger<=${params.triggerPrice}, reset>${params.triggerResetPrice}, entry=${params.minEntryPrice}-${params.maxEntryPrice}, secondsLeft=${params.minSecondsLeftToOpen}-${params.maxSecondsLeftToOpen}, confirm=${params.confirmSeconds}s, BTC margin>=${params.minDirectionalBtcMarginBps}bps, edge>=${params.minEdge}, spread<=${params.maxSpread}, vol=${params.volPerInterval}, shares=${params.orderShares}`);
+    } else if (cfg.strategy === "conditional-market-maker" || cfg.strategy === "conditional-market-maker-v2") {
         console.log(`Params: lookback=${cfg.conditionalMmLookbackSeconds}s, acceleration=${cfg.conditionalMmAccelerationLookbackSeconds}s/${cfg.conditionalMmMaxAccelerationBps}bps, maxRange=${cfg.conditionalMmMaxRangeBps}bps, maxTrend=${cfg.conditionalMmMaxTrendBps}bps, maxEfficiency=${cfg.conditionalMmMaxTrendEfficiency}@${cfg.conditionalMmTrendEfficiencyMinMomentumBps}bps, directionMin=${cfg.conditionalMmDirectionMinMomentumBps}bps, skew=+${cfg.conditionalMmFavoredPriceImprove}/-${cfg.conditionalMmUnfavoredPriceOffset}, size=${cfg.conditionalMmFavoredSizeMultiplier}/${cfg.conditionalMmUnfavoredSizeMultiplier}, maxNet=${cfg.conditionalMmMaxNetInventoryShares}, orderUsdc=${cfg.conditionalMmMinOrderUsdc}-${cfg.marketMakerMaxUsdcPerLeg}/leg`);
     } else if (cfg.strategy === "range-mid-reversion") {
         console.log(`Params: observe=${cfg.rangeMidObserveSeconds}s, profitDelta=${cfg.rangeMidProfitDelta}, maxHold=${cfg.rangeMidMaxHoldSeconds}s, forceExit=${cfg.rangeMidForceExitSecondsLeft}s, minSecondsLeft=${cfg.rangeMidMinSecondsLeftToOpen}s, minCrosses=${cfg.rangeMidMinMidCrosses}, shares=${cfg.rangeMidShares}`);
@@ -2721,7 +3092,7 @@ function printSummary(cycles: CycleState[], trades: Trade[], cfg: BacktestConfig
     } else if (cfg.strategy === "final-30-hedged") {
         console.log(`Params: ask>=${cfg.final30HighTriggerPrice} in final ${cfg.final30HighMaxSecondsLeftToOpen}s, maxEntry=${cfg.final30HighMaxEntryPrice}, shares=${cfg.final30HighOrderShares}, maxPairCost=${cfg.final30HedgedMaxPairCost}`);
     } else if (cfg.strategy === "final-30-managed") {
-        console.log(`Params: ask>=${cfg.final30HighTriggerPrice} in final ${cfg.final30HighMaxSecondsLeftToOpen}s, earlyBtcMove=$${cfg.final30ManagedEarlyBtcMinMoveUsd}/ask>=${cfg.final30ManagedEarlyBtcMinAsk}/until=${cfg.final30ManagedEarlyBtcMaxSecondsLeft}s, direction=${cfg.final30ManagedBtcDirectionRequired}, BTC margin day=${cfg.final30ManagedDayMinDirectionalMarginBps}bps/night=${cfg.final30ManagedNightMinDirectionalMarginBps}bps (${cfg.final30ManagedDayStartHour}:00-${cfg.final30ManagedDayEndHour}:00 UTC${cfg.final30ManagedTimezoneOffsetHours >= 0 ? "+" : ""}${cfg.final30ManagedTimezoneOffsetHours}), gapSafety>=${cfg.final30ManagedTrendMinGapSafety}, peakRatio>=${cfg.final30ManagedTrendMinPeakGapRatio}, spread<=${cfg.final30ManagedTrendMaxSpread}, maxEntry=${cfg.final30HighMaxEntryPrice}, shares=${cfg.final30HighOrderShares}, takeProfitDelta=${cfg.final30ManagedTakeProfitDelta}, stopLossDelta=${cfg.final30ManagedStopLossDelta}, stopBtcReversal=${cfg.final30ManagedStopMinBtcReversalBps}bps, stopConfirm=${cfg.final30ManagedStopConfirmSeconds}s, stopMaxMargin=${cfg.final30ManagedStopMaxDirectionalMarginBps}bps`);
+        console.log(`Params: ask>=${cfg.final30HighTriggerPrice} in final ${cfg.final30HighMaxSecondsLeftToOpen}s, earlyBtcMove=$${cfg.final30ManagedEarlyBtcMinMoveUsd}/ask>=${cfg.final30ManagedEarlyBtcMinAsk}/until=${cfg.final30ManagedEarlyBtcMaxSecondsLeft}s, direction=${cfg.final30ManagedBtcDirectionRequired}, BTC margin day=${cfg.final30ManagedDayMinDirectionalMarginBps}bps/night=${cfg.final30ManagedNightMinDirectionalMarginBps}bps (${cfg.final30ManagedDayStartHour}:00-${cfg.final30ManagedDayEndHour}:00 UTC${cfg.final30ManagedTimezoneOffsetHours >= 0 ? "+" : ""}${cfg.final30ManagedTimezoneOffsetHours}), gapSafety>=${cfg.final30ManagedTrendMinGapSafety}, peakRatio>=${cfg.final30ManagedTrendMinPeakGapRatio}, spread<=${cfg.final30ManagedTrendMaxSpread}, maxEntry=${cfg.final30HighMaxEntryPrice}, shares=${cfg.final30HighOrderShares}, takeProfitDelta=${cfg.final30ManagedTakeProfitDelta}, stopLossDelta=${cfg.final30ManagedStopLossDelta}, stopLossPrice=${cfg.final30ManagedStopLossPrice > 0 ? cfg.final30ManagedStopLossPrice : "off"}, stopBtcReversal=${cfg.final30ManagedStopMinBtcReversalBps}bps, stopConfirm=${cfg.final30ManagedStopConfirmSeconds}s, stopMaxMargin=${cfg.final30ManagedStopMaxDirectionalMarginBps}bps, entryVel=${cfg.final30ManagedEntryVelocityLookbackSeconds > 0 ? `${cfg.final30ManagedEntryMinBtcVelocityBpsPerSec}bps/${cfg.final30ManagedEntryVelocityLookbackSeconds}s` : "off"}, entryAccel=${cfg.final30ManagedEntryAccelerationLookbackSeconds > 0 ? `${cfg.final30ManagedEntryMinBtcAccelerationBpsPerSec2}bps2/${cfg.final30ManagedEntryAccelerationLookbackSeconds}s` : "off"}`);
     } else if (cfg.strategy === "undervalued-hold") {
         console.log(`Params: entry=[${cfg.undervaluedHoldMinEntryPrice},${cfg.undervaluedHoldMaxEntryPrice}], edge>=${cfg.undervaluedHoldMinEdge}, realtimeVol=${cfg.undervaluedHoldVolatilityLookbackSeconds}s/${cfg.undervaluedHoldVolatilityMinSamples} samples clamp=${cfg.undervaluedHoldMinVolPerInterval}-${cfg.undervaluedHoldMaxVolPerInterval}, spread<=${cfg.undervaluedHoldMaxSpread}, BTC margin>=${cfg.undervaluedHoldMinBtcMarginBps}bps/${cfg.undervaluedHoldBtcConfirmSeconds}s, stabilization=${cfg.undervaluedHoldStabilizationLookbackSeconds}s drop<=${cfg.undervaluedHoldStabilizationMaxDrop} recovery>=${cfg.undervaluedHoldStabilizationMinRecovery}, secondsLeft=${cfg.undervaluedHoldMinSecondsLeftToOpen}-${cfg.undervaluedHoldMaxSecondsLeftToOpen}, shares=${cfg.undervaluedHoldOrderShares}, stopLossPct=${cfg.undervaluedHoldStopLossPct}, convergenceTP=+${cfg.undervaluedHoldTakeProfitMinDelta}/edge<=${cfg.undervaluedHoldTakeProfitMaxRemainingEdge}`);
     } else if (cfg.strategy === "undervalued-final-managed") {
@@ -3082,6 +3453,10 @@ function runStrategy(cfg: BacktestConfig, records: Record<string, string>[]): { 
         }
         case "range-arb":
             return runRangeArbBacktest(rows, cfg);
+        case "maker-range":
+            return runMakerRangeBacktest(rows, cfg);
+        case "reverse-touch-edge":
+            return runReverseTouchEdgeBacktest(rows, cfg);
         case "range-mid-reversion":
             return runRangeMidReversionBacktest(rows, cfg);
         case "conditional-rebound":
@@ -3090,6 +3465,8 @@ function runStrategy(cfg: BacktestConfig, records: Record<string, string>[]): { 
             return runMarketMakerBacktest(rows, cfg);
         case "conditional-market-maker":
             return runConditionalMarketMakerBacktest(rows, cfg);
+        case "conditional-market-maker-v2":
+            return runConditionalMarketMakerV2Backtest(rows, cfg);
         case "hybrid":
             return runHybridBacktest(rows, cfg);
         case "managed-edge":

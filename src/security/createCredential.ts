@@ -37,6 +37,15 @@ export async function createCredential(): Promise<ApiKeyCreds | null> {
             signatureType: SignatureTypeV2.EOA,
         });
         const credential = await clobClient.createOrDeriveApiKey();
+        // Guard: the API can hand back an empty/partial object (observed 2026-10-10). Writing it
+        // would silently clobber a good credential.json and blow up later with a cryptic
+        // "Cannot read properties of undefined (reading 'replace')" inside getClobClient().
+        if (!credential || !credential.key || !credential.secret || !credential.passphrase) {
+            logger.error(
+                `createCredential: API returned an incomplete credential (fields=${credential ? Object.keys(credential).join(",") || "none" : "null"}); refusing to overwrite credential.json`
+            );
+            return null;
+        }
         await saveCredential(credential);
 
         logger.info("Credential created successfully");

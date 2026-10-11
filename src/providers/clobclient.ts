@@ -24,6 +24,12 @@ export async function getClobClient(): Promise<ClobClient> {
     }
 
     const creds: ApiKeyCreds = JSON.parse(readFileSync(credentialPath(), "utf-8"));
+    if (!creds || !creds.key || !creds.secret || !creds.passphrase) {
+        throw new Error(
+            `Credential file ${credentialPath()} is incomplete (missing key/secret/passphrase). ` +
+            `Delete it so it can be re-derived from WALLET_PRIVATE_KEY.`
+        );
+    }
     
     const chainId = (config.chainId || Chain.POLYGON) as Chain;
     const host = config.clobApiUrl;
